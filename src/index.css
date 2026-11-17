@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: "Plus Jakarta Sans", "Outfit", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-sans: "DM Sans", "Plus Jakarta Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  html, body {
+    font-family: var(--font-sans);
+    background-color: #0B0D11;
+    color: #F1F5F9;
+    overscroll-behavior-y: contain;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono, .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom studio scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B0D11;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #282E3D;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3B445B;
+}
+
+/* Checkerboard background for transparency previews */
+.bg-checkerboard {
+  background-color: #161922;
+  background-image:
+    linear-gradient(45deg, #202532 25%, transparent 25%),
+    linear-gradient(-45deg, #202532 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #202532 75%),
+    linear-gradient(-45deg, transparent 75%, #202532 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
