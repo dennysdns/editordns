@@ -159,7 +159,7 @@ export const ChromaKeyView: React.FC<ChromaKeyViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 pb-24 lg:pb-8 space-y-5">
+    <div className="max-w-7xl mx-auto px-3 sm:px-5 py-3 pb-20 lg:pb-8 space-y-3">
       <input
         ref={fileInputRef}
         type="file"
@@ -178,52 +178,52 @@ export const ChromaKeyView: React.FC<ChromaKeyViewProps> = ({
         }}
       />
 
-      <div className="rounded-2xl bg-[#13161D] border border-white/8 p-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="rounded-xl bg-[#13161D] border border-white/8 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="text-lg font-bold text-white">Chroma Key Offline (Tela Verde / Azul)</h1>
-          <p className="text-xs text-slate-400">
+          <h1 className="text-sm sm:text-base font-bold text-white">Chroma Key Offline (Tela Verde / Azul)</h1>
+          <p className="text-[11px] text-slate-400">
             Recorte de cor em tempo real por distância RGB e supressão de vazamento (Spill)
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="min-h-[40px] px-3.5 rounded-xl bg-[#1A1E28] border border-white/12 text-xs font-semibold text-white hover:bg-white/10 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-[#1A1E28] border border-white/12 text-[11px] font-semibold text-white hover:bg-white/10 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Upload className="w-4 h-4 text-amber-400" />
+            <Upload className="w-3.5 h-3.5 text-amber-400" />
             Carregar Imagem
           </button>
           <button
             onClick={() => handleSaveResult(false)}
-            className="min-h-[40px] px-3.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-300 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
           >
-            <CheckCircle2 className="w-4 h-4" />
-            Salvar no Projeto e Galeria
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            Salvar
           </button>
           <button
             onClick={() => handleSaveResult(true)}
-            className="min-h-[40px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-3.5 h-3.5" />
             Baixar PNG
           </button>
         </div>
       </div>
 
       {notice && (
-        <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-2.5 text-xs text-emerald-300">
+        <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 text-[11px] text-emerald-300">
           {notice}
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-5 items-start">
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3">
-          <div className="flex items-center justify-between">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_290px] gap-3 items-start">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
             <select
               value={selectedMediaId}
               onChange={(e) => setSelectedMediaId(e.target.value)}
-              className="rounded-lg bg-[#0B0D11] border border-white/12 px-3 py-2 text-xs text-white max-w-xs"
+              className="h-7 rounded-lg bg-[#0B0D11] border border-white/12 px-2.5 text-[11px] text-white max-w-xs"
             >
               <option value="">Cena Demo Tela Verde (Offline)</option>
               {imageMedia.map((m) => (
@@ -234,14 +234,14 @@ export const ChromaKeyView: React.FC<ChromaKeyViewProps> = ({
             </select>
             <button
               onClick={() => setEyedropperActive((v) => !v)}
-              className={`min-h-[38px] px-3 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer ${
+              className={`h-7 px-2.5 rounded-lg text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer ${
                 eyedropperActive
                   ? 'bg-cyan-500 text-slate-950 font-semibold'
                   : 'bg-[#1A1E28] text-slate-200 hover:bg-white/10'
               }`}
             >
-              <Pipette className="w-4 h-4" />
-              {eyedropperActive ? 'Clique na cor no palco...' : 'Conta-Gotas'}
+              <Pipette className="w-3.5 h-3.5" />
+              {eyedropperActive ? 'Clique na cor...' : 'Conta-Gotas'}
             </button>
           </div>
 
@@ -249,7 +249,7 @@ export const ChromaKeyView: React.FC<ChromaKeyViewProps> = ({
             <canvas
               ref={canvasRef}
               onClick={handleCanvasClick}
-              className={`max-h-[480px] w-auto object-contain ${
+              className={`max-h-[420px] w-auto object-contain ${
                 eyedropperActive ? 'cursor-crosshair' : 'cursor-default'
               }`}
             />

@@ -1,9 +1,9 @@
 import { MediaFile, MediaKind, VirtualFolderId } from '../types/studio';
 import { decodeAudioBlob } from './audioEngine';
 
-export const SUPPORTED_AUDIO_EXTS = ['mp3', 'wav', 'aac', 'ogg', 'm4a'];
+export const SUPPORTED_AUDIO_EXTS = ['mp3', 'wav', 'aac', 'ogg', 'm4a', 'opus', 'flac'];
 export const SUPPORTED_VIDEO_EXTS = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
-export const SUPPORTED_IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+export const SUPPORTED_IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'];
 
 export const ALL_ACCEPTED_EXTENSIONS = [
   ...SUPPORTED_AUDIO_EXTS,

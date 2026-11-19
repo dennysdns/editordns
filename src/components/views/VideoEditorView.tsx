@@ -19,7 +19,12 @@ import {
   Copy,
   ArrowDownToLine,
   Layers,
+  X,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
 } from 'lucide-react';
+import { useStageZoom } from '../../hooks/useStageZoom';
 import {
   AudioClip,
   DEFAULT_CHROMA_KEY,
@@ -35,13 +40,21 @@ import {
   drawTextLayer,
   ensureStudioBackgroundLoaded,
 } from '../../utils/canvasRenderer';
-import { decodeAudioBlob, getAudioContext } from '../../utils/audioEngine';
+import {
+  decodeAudioBlob,
+  getAudioContext,
+  getEffectiveMasterVolume,
+  getMasterDestination,
+} from '../../utils/audioEngine';
 import {
   ALL_ACCEPTED_EXTENSIONS,
   formatDuration,
   processImportedFile,
 } from '../../utils/mediaImporter';
 import { DecodedGif, pickGifFrameAtTime } from '../../utils/gifDecoder';
+import { AerialTimeline } from '../AerialTimeline';
+import { STAGE_RESOLUTIONS, getAspectLabel } from '../../utils/resolutionPresets';
+import { resizeProjectDimensions } from '../../storage/localDb';
 
 interface VideoEditorViewProps {
   project: StudioProject;
@@ -52,6 +65,7 @@ interface VideoEditorViewProps {
   onUpdateProject: (updated: StudioProject) => void;
   onSaveProject: () => Promise<void>;
   onImportMedia: (files: MediaFile[]) => Promise<void>;
+  onDeleteMedia: (ids: string[]) => Promise<void>;
   onOpenExport?: () => void;
 }
 
@@ -64,9 +78,11 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
   onUpdateProject,
   onSaveProject,
   onImportMedia,
+  onDeleteMedia,
   onOpenExport,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stageViewportRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importTargetTrackRef = useRef<'video' | 'overlay'>('video');
   const audioBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
@@ -81,6 +97,12 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
   );
   const [selectedAudioClipId, setSelectedAudioClipId] = useState<string | null>(null);
   const [saveLabel, setSaveLabel] = useState<string | null>(null);
+  const [cutAnchor, setCutAnchor] = useState<{
+    kind: 'video' | 'audio';
+    clipId: string;
+    track: 'overlay' | 'video' | 'audio';
+    time: number;
+  } | null>(null);
 
   const canvasDragRef = useRef<{
     active: boolean;
@@ -108,12 +130,24 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     startAngle: 0,
   });
 
+  const stageZoom = useStageZoom(stageViewportRef, {
+    minZoom: 1,
+    maxZoom: 5,
+    initialEnabled: true,
+    onPinchStart: () => {
+      canvasDragRef.current.active = false;
+    },
+  });
+
   const timelineDragRef = useRef<{
     active: boolean;
+    moved: boolean;
     kind: 'video' | 'audio';
+    track: 'overlay' | 'video' | 'audio';
     mode: 'move' | 'trim-left' | 'trim-right';
     clipId: string;
     startClientX: number;
+    clickTime: number;
     origStartTime: number;
     origTrimStart: number;
     origDuration: number;
@@ -122,10 +156,13 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     trackWidthPx: number;
   }>({
     active: false,
+    moved: false,
     kind: 'video',
+    track: 'video',
     mode: 'move',
     clipId: '',
     startClientX: 0,
+    clickTime: 0,
     origStartTime: 0,
     origTrimStart: 0,
     origDuration: 0,
@@ -228,7 +265,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         bass.connect(mid);
         mid.connect(treble);
         treble.connect(gainNode);
-        gainNode.connect(ctx.destination);
+        gainNode.connect(getMasterDestination());
 
         if (playFrom >= aclip.startTime) {
           const offsetInsideClip = (playFrom - aclip.startTime) * aclip.speed;
@@ -400,9 +437,10 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         if (vel && vel.readyState >= 2) {
           const targetT = Math.min(vel.duration || localSrcTime, localSrcTime);
           if (isPlaying) {
+            const masterVol = getEffectiveMasterVolume();
             vel.playbackRate = Math.max(0.25, Math.min(4, clip.speed));
-            vel.volume = Math.max(0, Math.min(1, clip.volume));
-            vel.muted = false;
+            vel.volume = Math.max(0, Math.min(1, clip.volume * masterVol));
+            vel.muted = masterVol <= 0.001 || clip.volume <= 0.001;
             if (Math.abs(vel.currentTime - targetT) > 0.45) {
               vel.currentTime = targetT;
             }
@@ -526,6 +564,16 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
   };
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (stageZoom.isMultiTouchBlocked()) return;
+
+    // Middle mouse or Alt+drag pans the zoomed stage even during playback
+    if (e.button === 1 || (e.altKey && stageZoom.zoom > 1.01)) {
+      e.preventDefault();
+      stageZoom.startPanDrag(e.clientX, e.clientY);
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      return;
+    }
+
     if (isPlaying) return;
     const pt = toCanvasCoords(e.clientX, e.clientY);
 
@@ -601,6 +649,9 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     }
 
     if (hitClip) {
+      if (e.pointerType === 'touch' && stageZoom.handleTouchDoubleTapCheck(e.clientX, e.clientY, true)) {
+        return;
+      }
       setSelectedClipId(hitClip.id);
       setSelectedAudioClipId(null);
       canvasDragRef.current = {
@@ -618,11 +669,21 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
       };
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     } else {
-      setSelectedClipId(null);
+      if (e.pointerType === 'touch' && stageZoom.handleTouchDoubleTapCheck(e.clientX, e.clientY, true)) {
+        return;
+      }
+      if (stageZoom.zoom > 1.01) {
+        stageZoom.startPanDrag(e.clientX, e.clientY);
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      } else {
+        setSelectedClipId(null);
+      }
     }
   };
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (stageZoom.isMultiTouchBlocked()) return;
+    if (stageZoom.movePanDrag(e.clientX, e.clientY)) return;
     const drag = canvasDragRef.current;
     if (!drag.active) return;
     const target = project.videoClips.find((c) => c.id === drag.clipId);
@@ -668,6 +729,12 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
   };
 
   const handleCanvasPointerUp = () => {
+    if (stageZoom.panDragRef.current.active) {
+      const moved = stageZoom.endPanDrag();
+      if (!moved) {
+        setSelectedClipId(null);
+      }
+    }
     canvasDragRef.current.active = false;
   };
 
@@ -975,6 +1042,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         videoClips: project.videoClips.filter((c) => c.id !== selectedClip.id),
       });
       setSelectedClipId(null);
+      setCutAnchor(null);
       return;
     }
     if (selectedAudioClip) {
@@ -983,77 +1051,168 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         audioClips: project.audioClips.filter((a) => a.id !== selectedAudioClip.id),
       });
       setSelectedAudioClipId(null);
+      setCutAnchor(null);
     }
   };
 
-  const splitSelectedClipAtPlayhead = () => {
-    if (selectedClip) {
-      const clipEnd =
-        selectedClip.startTime + selectedClip.duration / Math.max(0.25, selectedClip.speed);
-      if (currentTime <= selectedClip.startTime + 0.1 || currentTime >= clipEnd - 0.1) return;
+  const splitClipAtTime = (kind: 'video' | 'audio', clipId: string, targetTime: number) => {
+    if (kind === 'video') {
+      const clip = project.videoClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const spd = Math.max(0.25, clip.speed);
+      const clipEnd = clip.startTime + clip.duration / spd;
+      if (targetTime <= clip.startTime + 0.05 || targetTime >= clipEnd - 0.05) return;
 
-      const firstPlayDur = currentTime - selectedClip.startTime;
-      const firstSourceDur = firstPlayDur * selectedClip.speed;
-      const remainSourceDur = Math.max(0.2, selectedClip.duration - firstSourceDur);
+      const firstPlayDur = targetTime - clip.startTime;
+      const firstSourceDur = firstPlayDur * spd;
+      const remainSourceDur = Math.max(0.15, clip.duration - firstSourceDur);
 
       const firstHalf: VideoClip = {
-        ...selectedClip,
+        ...clip,
         duration: Number(firstSourceDur.toFixed(2)),
       };
       const secondHalf: VideoClip = {
-        ...selectedClip,
+        ...clip,
         id: `vclip-${Date.now()}`,
-        name: `${selectedClip.name} (Parte 2)`,
-        startTime: Number(currentTime.toFixed(2)),
-        trimStart: Number((selectedClip.trimStart + firstSourceDur).toFixed(2)),
+        name: `${clip.name} (Parte 2)`,
+        startTime: Number(targetTime.toFixed(2)),
+        trimStart: Number((clip.trimStart + firstSourceDur).toFixed(2)),
         duration: Number(remainSourceDur.toFixed(2)),
       };
 
       onUpdateProject({
         ...project,
         videoClips: project.videoClips.flatMap((c) =>
-          c.id === selectedClip.id ? [firstHalf, secondHalf] : [c]
+          c.id === clip.id ? [firstHalf, secondHalf] : [c]
         ),
       });
       setSelectedClipId(secondHalf.id);
+      setCutAnchor(null);
       return;
     }
 
-    if (selectedAudioClip) {
-      const clipEnd =
-        selectedAudioClip.startTime +
-        selectedAudioClip.duration / Math.max(0.25, selectedAudioClip.speed);
-      if (
-        currentTime <= selectedAudioClip.startTime + 0.1 ||
-        currentTime >= clipEnd - 0.1
-      ) {
-        return;
-      }
+    const aclip = project.audioClips.find((a) => a.id === clipId);
+    if (!aclip) return;
+    const spd = Math.max(0.25, aclip.speed);
+    const clipEnd = aclip.startTime + aclip.duration / spd;
+    if (targetTime <= aclip.startTime + 0.05 || targetTime >= clipEnd - 0.05) return;
 
-      const firstPlayDur = currentTime - selectedAudioClip.startTime;
-      const firstSourceDur = firstPlayDur * selectedAudioClip.speed;
-      const remainSourceDur = Math.max(0.2, selectedAudioClip.duration - firstSourceDur);
+    const firstPlayDur = targetTime - aclip.startTime;
+    const firstSourceDur = firstPlayDur * spd;
+    const remainSourceDur = Math.max(0.15, aclip.duration - firstSourceDur);
 
-      const firstHalf: AudioClip = {
-        ...selectedAudioClip,
-        duration: Number(firstSourceDur.toFixed(2)),
-      };
-      const secondHalf: AudioClip = {
-        ...selectedAudioClip,
-        id: `aclip-${Date.now()}`,
-        name: `${selectedAudioClip.name} (Parte 2)`,
-        startTime: Number(currentTime.toFixed(2)),
-        trimStart: Number((selectedAudioClip.trimStart + firstSourceDur).toFixed(2)),
-        duration: Number(remainSourceDur.toFixed(2)),
-      };
+    const firstHalf: AudioClip = {
+      ...aclip,
+      duration: Number(firstSourceDur.toFixed(2)),
+    };
+    const secondHalf: AudioClip = {
+      ...aclip,
+      id: `aclip-${Date.now()}`,
+      name: `${aclip.name} (Parte 2)`,
+      startTime: Number(targetTime.toFixed(2)),
+      trimStart: Number((aclip.trimStart + firstSourceDur).toFixed(2)),
+      duration: Number(remainSourceDur.toFixed(2)),
+    };
 
+    onUpdateProject({
+      ...project,
+      audioClips: project.audioClips.flatMap((a) =>
+        a.id === aclip.id ? [firstHalf, secondHalf] : [a]
+      ),
+    });
+    setSelectedAudioClipId(secondHalf.id);
+    setCutAnchor(null);
+  };
+
+  const trimClipBeforeTime = (kind: 'video' | 'audio', clipId: string, targetTime: number) => {
+    if (kind === 'video') {
+      const clip = project.videoClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const spd = Math.max(0.25, clip.speed);
+      const clipEnd = clip.startTime + clip.duration / spd;
+      if (targetTime <= clip.startTime + 0.05 || targetTime >= clipEnd - 0.05) return;
+      const cutSourceDur = (targetTime - clip.startTime) * spd;
+      const remainSourceDur = Math.max(0.15, clip.duration - cutSourceDur);
       onUpdateProject({
         ...project,
-        audioClips: project.audioClips.flatMap((a) =>
-          a.id === selectedAudioClip.id ? [firstHalf, secondHalf] : [a]
+        videoClips: project.videoClips.map((c) =>
+          c.id === clip.id
+            ? {
+                ...c,
+                startTime: Number(targetTime.toFixed(2)),
+                trimStart: Number((c.trimStart + cutSourceDur).toFixed(2)),
+                duration: Number(remainSourceDur.toFixed(2)),
+              }
+            : c
         ),
       });
-      setSelectedAudioClipId(secondHalf.id);
+      setCutAnchor(null);
+      return;
+    }
+
+    const aclip = project.audioClips.find((a) => a.id === clipId);
+    if (!aclip) return;
+    const spd = Math.max(0.25, aclip.speed);
+    const clipEnd = aclip.startTime + aclip.duration / spd;
+    if (targetTime <= aclip.startTime + 0.05 || targetTime >= clipEnd - 0.05) return;
+    const cutSourceDur = (targetTime - aclip.startTime) * spd;
+    const remainSourceDur = Math.max(0.15, aclip.duration - cutSourceDur);
+    onUpdateProject({
+      ...project,
+      audioClips: project.audioClips.map((a) =>
+        a.id === aclip.id
+          ? {
+              ...a,
+              startTime: Number(targetTime.toFixed(2)),
+              trimStart: Number((a.trimStart + cutSourceDur).toFixed(2)),
+              duration: Number(remainSourceDur.toFixed(2)),
+            }
+          : a
+      ),
+    });
+    setCutAnchor(null);
+  };
+
+  const trimClipAfterTime = (kind: 'video' | 'audio', clipId: string, targetTime: number) => {
+    if (kind === 'video') {
+      const clip = project.videoClips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const spd = Math.max(0.25, clip.speed);
+      const clipEnd = clip.startTime + clip.duration / spd;
+      if (targetTime <= clip.startTime + 0.05 || targetTime >= clipEnd - 0.05) return;
+      const keepSourceDur = Math.max(0.15, (targetTime - clip.startTime) * spd);
+      onUpdateProject({
+        ...project,
+        videoClips: project.videoClips.map((c) =>
+          c.id === clip.id ? { ...c, duration: Number(keepSourceDur.toFixed(2)) } : c
+        ),
+      });
+      setCutAnchor(null);
+      return;
+    }
+
+    const aclip = project.audioClips.find((a) => a.id === clipId);
+    if (!aclip) return;
+    const spd = Math.max(0.25, aclip.speed);
+    const clipEnd = aclip.startTime + aclip.duration / spd;
+    if (targetTime <= aclip.startTime + 0.05 || targetTime >= clipEnd - 0.05) return;
+    const keepSourceDur = Math.max(0.15, (targetTime - aclip.startTime) * spd);
+    onUpdateProject({
+      ...project,
+      audioClips: project.audioClips.map((a) =>
+        a.id === aclip.id ? { ...a, duration: Number(keepSourceDur.toFixed(2)) } : a
+      ),
+    });
+    setCutAnchor(null);
+  };
+
+  const splitSelectedClipAtPlayhead = () => {
+    if (selectedClip) {
+      splitClipAtTime('video', selectedClip.id, currentTime);
+      return;
+    }
+    if (selectedAudioClip) {
+      splitClipAtTime('audio', selectedAudioClip.id, currentTime);
     }
   };
 
@@ -1061,6 +1220,8 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     const drag = timelineDragRef.current;
     if (!drag.active) return;
     const dx = e.clientX - drag.startClientX;
+    if (!drag.moved && Math.abs(dx) <= 5) return;
+    drag.moved = true;
     const dt = (dx / Math.max(120, drag.trackWidthPx)) * totalDuration;
 
     if (drag.kind === 'video') {
@@ -1115,14 +1276,26 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
   };
 
   const handleTimelinePointerUp = () => {
+    const drag = timelineDragRef.current;
+    if (drag.active && !drag.moved && drag.mode === 'move') {
+      setIsPlaying(false);
+      setCurrentTime(drag.clickTime);
+      setCutAnchor({
+        kind: drag.kind,
+        clipId: drag.clipId,
+        track: drag.track,
+        time: drag.clickTime,
+      });
+    }
     timelineDragRef.current.active = false;
   };
 
   const visualMedia = mediaFiles.filter((m) => m.kind === 'video' || m.kind === 'image');
   const audioMedia = mediaFiles.filter((m) => m.kind === 'audio');
+  const aspectLabel = getAspectLabel(project.width, project.height);
 
   return (
-    <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-4 pb-24 lg:pb-6 space-y-4">
+    <div className="max-w-[1600px] mx-auto pl-10 pr-2.5 sm:pl-11 sm:pr-4 py-2.5 pb-20 lg:pb-6 space-y-2.5">
       <input
         ref={fileInputRef}
         type="file"
@@ -1136,64 +1309,47 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
       />
 
       {/* Top Toolbar */}
-      <div className="rounded-xl bg-[#13161D] border border-white/8 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3">
+      <div className="rounded-xl bg-[#13161D] border border-white/8 px-3 py-1.5 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div>
-            <h1 className="text-base font-bold text-white">Editor de Vídeo Multipista</h1>
-            <p className="text-xs text-slate-400 font-mono tabular-nums">
-              {formatDuration(currentTime)} / {formatDuration(totalDuration)} · {project.width}×{project.height}
+            <h1 className="text-xs sm:text-sm font-bold text-white leading-tight">Editor de Vídeo Multipista</h1>
+            <p className="text-[10px] text-slate-400 font-mono tabular-nums">
+              {formatDuration(currentTime)} / {formatDuration(totalDuration)}
             </p>
           </div>
           <span
-            className="rounded-lg bg-[#1A1E28] border border-amber-500/30 px-2.5 py-1 text-xs text-amber-300 font-mono"
-            title="Proporção Única do Projeto"
+            className="rounded bg-[#1A1E28] border border-amber-500/30 px-2 py-0.5 text-[10px] text-amber-300 font-mono"
+            title="Proporção e Resolução do Projeto"
           >
-            9:16 · {project.width}×{project.height}
+            {aspectLabel} · {project.width}×{project.height}
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => setIsPlaying((p) => !p)}
-            className="min-h-[40px] px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
-          >
-            {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
-            {isPlaying ? 'PAUSAR' : 'PLAY'}
-          </button>
-          <button
-            onClick={() => {
-              setIsPlaying(false);
-              setCurrentTime(0);
-            }}
-            className="min-h-[40px] px-3 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer"
-          >
-            <Square className="w-3.5 h-3.5 fill-current" />
-            STOP
-          </button>
+        <div className="flex flex-wrap items-center gap-1">
           <button
             onClick={splitSelectedClipAtPlayhead}
             disabled={!selectedClip && !selectedAudioClip}
-            className="min-h-[40px] px-3 rounded-lg bg-[#1A1E28] hover:bg-white/10 disabled:opacity-40 text-xs font-medium text-cyan-300 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2 rounded-md bg-[#1A1E28] hover:bg-white/10 disabled:opacity-40 text-[11px] font-medium text-cyan-300 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Scissors className="w-3.5 h-3.5" />
-            Dividir no Cursor
+            <Scissors className="w-3 h-3" />
+            Dividir
           </button>
           <button
             type="button"
             onClick={() => duplicateSelectedClip(false)}
             disabled={!selectedClip && !selectedAudioClip}
-            className="min-h-[40px] px-3 rounded-lg bg-[#1A1E28] hover:bg-white/10 disabled:opacity-40 text-xs font-medium text-amber-300 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2 rounded-md bg-[#1A1E28] hover:bg-white/10 disabled:opacity-40 text-[11px] font-medium text-amber-300 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Copy className="w-3.5 h-3.5" />
+            <Copy className="w-3 h-3" />
             Duplicar
           </button>
           <button
             type="button"
             onClick={deleteSelectedFromTimeline}
             disabled={!selectedClip && !selectedAudioClip}
-            className="min-h-[40px] px-3 rounded-lg bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 disabled:opacity-40 text-xs font-medium text-red-300 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2 rounded-md bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 disabled:opacity-40 text-[11px] font-medium text-red-300 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            <Trash2 className="w-3 h-3" />
             Apagar
           </button>
           <button
@@ -1202,9 +1358,9 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               setSaveLabel('Salvo!');
               window.setTimeout(() => setSaveLabel(null), 2000);
             }}
-            className="min-h-[40px] px-3.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-300 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Save className="w-3.5 h-3.5" />
+            <Save className="w-3 h-3" />
             {saveLabel || 'Salvar'}
           </button>
           {onOpenExport && (
@@ -1214,79 +1370,79 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 await onSaveProject();
                 onOpenExport();
               }}
-              className="min-h-[40px] px-3.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-7 px-2.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
             >
-              <Download className="w-3.5 h-3.5" />
-              Exportar Vídeo c/ Áudio
+              <Download className="w-3 h-3" />
+              Exportar
             </button>
           )}
         </div>
       </div>
 
       {/* Main Split: Media Bin + Preview Monitor + Clip Inspector */}
-      <div className="grid grid-cols-1 lg:grid-cols-[270px_1fr_310px] gap-4 items-start">
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3.5 space-y-3">
+      <div className="grid grid-cols-1 lg:grid-cols-[245px_1fr_275px] gap-2.5 items-start">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-xs font-semibold text-slate-300">Mídia & Áudio</h2>
+            <h2 className="text-[11px] font-semibold text-slate-300">Mídia & Áudio</h2>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+              className="h-6 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
             >
               <Upload className="w-3 h-3" />
               Importar
             </button>
           </div>
 
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-2 gap-1">
             <button
               type="button"
               onClick={() => setMediaBinTab('visual')}
-              className={`min-h-[34px] rounded-lg text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer ${
+              className={`h-7 rounded-md text-[11px] font-medium inline-flex items-center justify-center gap-1 cursor-pointer ${
                 mediaBinTab === 'visual'
                   ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                   : 'bg-[#1A1E28] text-slate-300'
               }`}
             >
-              <Film className="w-3.5 h-3.5" />
+              <Film className="w-3 h-3" />
               Vídeos/Img ({visualMedia.length})
             </button>
             <button
               type="button"
               onClick={() => setMediaBinTab('audio')}
-              className={`min-h-[34px] rounded-lg text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer ${
+              className={`h-7 rounded-md text-[11px] font-medium inline-flex items-center justify-center gap-1 cursor-pointer ${
                 mediaBinTab === 'audio'
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                   : 'bg-[#1A1E28] text-slate-300'
               }`}
             >
-              <Music className="w-3.5 h-3.5" />
+              <Music className="w-3 h-3" />
               Áudio ({audioMedia.length})
             </button>
           </div>
 
           {mediaBinTab === 'visual' ? (
             <>
-              <div className="grid grid-cols-1 gap-1.5">
+              <div className="grid grid-cols-1 gap-1">
                 <button
                   type="button"
                   onClick={() => {
                     importTargetTrackRef.current = 'overlay';
                     fileInputRef.current?.click();
                   }}
-                  className="w-full min-h-[38px] rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-xs font-semibold text-cyan-200 flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="w-full h-7 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[11px] font-semibold text-cyan-200 flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <Layers className="w-3.5 h-3.5" />+ Criar Sobreposição (Vídeo/GIF/Img)
+                  <Layers className="w-3 h-3" />+ Criar Sobreposição
                 </button>
                 <button
                   type="button"
                   onClick={addOverlayTextClip}
-                  className="w-full min-h-[36px] rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-xs font-semibold text-amber-300 flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="w-full h-7 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-[11px] font-semibold text-amber-300 flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <Type className="w-3.5 h-3.5" />+ Texto / Legenda na Sobreposição
+                  <Type className="w-3 h-3" />+ Texto / Legenda
                 </button>
               </div>
-              <div className="max-h-72 overflow-y-auto space-y-1.5">
+              <div className="max-h-56 overflow-y-auto space-y-1">
                 {visualMedia.length === 0 ? (
                   <p className="text-xs text-slate-400 py-4 text-center">
                     Clique em Importar ou Criar Sobreposição acima para adicionar MP4, GIF ou imagens.
@@ -1315,6 +1471,18 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                             {m.kind === 'video' ? formatDuration(m.duration) : '4.0s'}
                           </p>
                         </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void onDeleteMedia([m.id]);
+                          }}
+                          className="p-1.5 rounded-md text-slate-400 hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer shrink-0"
+                          title="Apagar arquivo adicionado"
+                          aria-label={`Apagar ${m.name}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                       <div className="grid grid-cols-2 gap-1.5">
                         <button
@@ -1340,59 +1508,299 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               </div>
             </>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full min-h-[38px] rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center justify-center gap-1.5 cursor-pointer"
+                className="w-full h-7 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center justify-center gap-1 cursor-pointer"
               >
-                <Music className="w-3.5 h-3.5" />+ Importar Áudio (MP3/WAV/M4A)
+                <Music className="w-3 h-3" />+ Importar Áudio (MP3/WAV/M4A)
               </button>
-              <div className="max-h-72 overflow-y-auto space-y-1.5">
+              <div className="max-h-56 overflow-y-auto space-y-1">
                 {audioMedia.length === 0 ? (
                   <p className="text-xs text-slate-400 py-4 text-center">
                     Importe músicas ou efeitos sonoros MP3/WAV/AAC/OGG acima para adicionar ao vídeo.
                   </p>
                 ) : (
                   audioMedia.map((m) => (
-                    <button
+                    <div
                       key={m.id}
-                      onClick={() => void appendAudioClipFromMedia(m)}
-                      className="w-full flex items-center gap-2.5 rounded-lg bg-[#1A1E28] hover:bg-emerald-500/15 border border-white/5 hover:border-emerald-500/30 p-2 text-left cursor-pointer"
+                      className="w-full flex items-center gap-1 rounded-lg bg-[#1A1E28] hover:border-emerald-500/30 border border-white/5 p-1.5"
                     >
-                      <Music className="w-5 h-5 text-emerald-400 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-medium text-white truncate">{m.name}</p>
-                        <p className="text-[10px] font-mono text-slate-400">
-                          + Adicionar Áudio {formatDuration(m.duration)}
-                        </p>
-                      </div>
-                      <Plus className="w-4 h-4 text-emerald-400 shrink-0" />
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => void appendAudioClipFromMedia(m)}
+                        className="flex-1 min-w-0 flex items-center gap-2 text-left cursor-pointer hover:opacity-90"
+                      >
+                        <Music className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] font-medium text-white truncate">{m.name}</p>
+                          <p className="text-[10px] font-mono text-slate-400">
+                            + Adicionar {formatDuration(m.duration)}
+                          </p>
+                        </div>
+                        <Plus className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void onDeleteMedia([m.id]);
+                        }}
+                        className="p-1.5 rounded-md text-slate-400 hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer shrink-0"
+                        title="Apagar áudio adicionado"
+                        aria-label={`Apagar ${m.name}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
             </div>
           )}
+
+          {/* Added files currently inside the active composition */}
+          <div className="pt-2 border-t border-white/8 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-amber-400" />
+                Na Composição ({project.videoClips.length + project.audioClips.length})
+              </span>
+            </div>
+            <div className="max-h-40 overflow-y-auto space-y-1">
+              {project.videoClips.length === 0 && project.audioClips.length === 0 ? (
+                <p className="text-[10px] text-slate-500 py-2 text-center">
+                  Nenhum arquivo adicionado na composição.
+                </p>
+              ) : (
+                <>
+                  {project.videoClips.map((clip) => {
+                    const active = selectedClipId === clip.id;
+                    return (
+                      <div
+                        key={clip.id}
+                        onClick={() => {
+                          setSelectedClipId(clip.id);
+                          setSelectedAudioClipId(null);
+                        }}
+                        className={`flex items-center justify-between gap-1.5 rounded-md px-2 py-1 text-[11px] border cursor-pointer ${
+                          active
+                            ? 'bg-amber-500/15 border-amber-500/40 text-amber-200'
+                            : 'bg-[#1A1E28] border-white/5 text-slate-300 hover:border-white/15'
+                        }`}
+                      >
+                        <span className="truncate flex-1">
+                          {clip.track === 'overlay' ? 'Sobr.' : 'Princ.'} · {clip.name}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUpdateProject({
+                              ...project,
+                              videoClips: project.videoClips.filter((c) => c.id !== clip.id),
+                            });
+                            if (selectedClipId === clip.id) setSelectedClipId(null);
+                            if (cutAnchor?.clipId === clip.id) setCutAnchor(null);
+                          }}
+                          className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/15 cursor-pointer shrink-0"
+                          title="Apagar da composição"
+                          aria-label={`Apagar ${clip.name} da composição`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {project.audioClips.map((aclip) => {
+                    const active = selectedAudioClipId === aclip.id;
+                    return (
+                      <div
+                        key={aclip.id}
+                        onClick={() => {
+                          setSelectedAudioClipId(aclip.id);
+                          setSelectedClipId(null);
+                        }}
+                        className={`flex items-center justify-between gap-1.5 rounded-md px-2 py-1 text-[11px] border cursor-pointer ${
+                          active
+                            ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                            : 'bg-[#1A1E28] border-white/5 text-slate-300 hover:border-white/15'
+                        }`}
+                      >
+                        <span className="truncate flex-1">Áudio · {aclip.name}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUpdateProject({
+                              ...project,
+                              audioClips: project.audioClips.filter((a) => a.id !== aclip.id),
+                            });
+                            if (selectedAudioClipId === aclip.id) setSelectedAudioClipId(null);
+                            if (cutAnchor?.clipId === aclip.id) setCutAnchor(null);
+                          }}
+                          className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/15 cursor-pointer shrink-0"
+                          title="Apagar áudio da composição"
+                          aria-label={`Apagar ${aclip.name} da composição`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          </div>
         </div>
 
-        {/* Center Video Monitor (Touch + Mouse Drag / Resize / Rotate) */}
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-2.5">
-          <div className="w-full rounded-lg bg-[#0B0D11] border border-white/10 overflow-hidden p-2 flex items-center justify-center">
-            <canvas
-              ref={canvasRef}
-              width={project.width}
-              height={project.height}
-              onPointerDown={handleCanvasPointerDown}
-              onPointerMove={handleCanvasPointerMove}
-              onPointerUp={handleCanvasPointerUp}
-              onPointerCancel={handleCanvasPointerUp}
-              className="max-h-[440px] w-auto max-w-full h-auto mx-auto block touch-none select-none cursor-grab active:cursor-grabbing"
-            />
+        {/* Center Video Monitor (Touch + Mouse Drag / Resize / Rotate) + Stage Resolutions */}
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-1.5">
+            <span className="text-[10px] font-semibold text-slate-400">
+              Palco ({aspectLabel} · {project.width}×{project.height})
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* Controles de Zoom do Player (Scroll Mouse + Touch Pinch/Duplo Toque) */}
+              <div
+                className="flex items-center gap-0.5 bg-[#0B0D11] border border-white/10 rounded-md p-0.5"
+                role="group"
+                aria-label="Zoom do Player de Vídeo"
+              >
+                <button
+                  type="button"
+                  onClick={() => stageZoom.setZoomEnabled((v) => !v)}
+                  className={`h-6 px-1.5 rounded text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                    stageZoom.zoomEnabled
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-slate-400 hover:bg-white/10'
+                  }`}
+                  title="Ativar ou desativar zoom no scroll do mouse e toque na tela"
+                >
+                  <ZoomIn className="w-3 h-3" />
+                  <span>Zoom</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => stageZoom.zoomByStep(-1)}
+                  disabled={stageZoom.zoom <= 1}
+                  className="h-6 w-6 rounded text-slate-300 hover:bg-white/10 disabled:opacity-35 inline-flex items-center justify-center cursor-pointer"
+                  title="Reduzir zoom"
+                  aria-label="Reduzir zoom"
+                >
+                  <ZoomOut className="w-3 h-3" />
+                </button>
+                <span className="text-[10px] font-mono text-amber-300 min-w-[36px] text-center">
+                  {Math.round(stageZoom.zoom * 100)}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => stageZoom.zoomByStep(1)}
+                  disabled={stageZoom.zoom >= 5}
+                  className="h-6 w-6 rounded text-slate-300 hover:bg-white/10 disabled:opacity-35 inline-flex items-center justify-center cursor-pointer"
+                  title="Aumentar zoom"
+                  aria-label="Aumentar zoom"
+                >
+                  <ZoomIn className="w-3 h-3" />
+                </button>
+                {stageZoom.zoom > 1.01 && (
+                  <button
+                    type="button"
+                    onClick={stageZoom.resetZoom}
+                    className="h-6 px-1.5 rounded text-[10px] font-semibold text-slate-200 bg-white/10 hover:bg-white/20 inline-flex items-center gap-0.5 cursor-pointer"
+                    title="Voltar ao tamanho original (100%)"
+                  >
+                    <RotateCcw className="w-2.5 h-2.5" />
+                    <span>1:1</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1" role="group" aria-label="Resoluções do Palco">
+                {STAGE_RESOLUTIONS.map((preset) => {
+                  const isSelectedRes =
+                    project.width === preset.width && project.height === preset.height;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        stageZoom.resetZoom();
+                        onUpdateProject(resizeProjectDimensions(project, preset.width, preset.height));
+                      }}
+                      className={`h-6 px-2 rounded text-[10px] font-mono font-semibold cursor-pointer ${
+                        isSelectedRes
+                          ? 'bg-amber-500 text-slate-950'
+                          : 'bg-[#1A1E28] text-slate-300 hover:bg-white/10'
+                      }`}
+                      title={preset.description}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
-          <div className="text-[11px] text-slate-400 px-1 flex flex-wrap items-center justify-between gap-2">
+
+          <div
+            ref={stageViewportRef}
+            className="w-full rounded-lg bg-[#0B0D11] border border-white/10 overflow-hidden relative touch-none select-none"
+          >
+            <div
+              style={{
+                transform: `translate(${stageZoom.pan.x}px, ${stageZoom.pan.y}px) scale(${stageZoom.zoom})`,
+                transformOrigin: '0 0',
+              }}
+              className="w-full p-1.5 flex items-center justify-center will-change-transform"
+            >
+              <canvas
+                ref={canvasRef}
+                width={project.width}
+                height={project.height}
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={handleCanvasPointerUp}
+                onPointerCancel={handleCanvasPointerUp}
+                className="max-h-[340px] sm:max-h-[370px] w-auto max-w-full h-auto mx-auto block touch-none select-none cursor-grab active:cursor-grabbing"
+              />
+            </div>
+            {stageZoom.zoom > 1.01 && (
+              <button
+                type="button"
+                onClick={stageZoom.resetZoom}
+                className="absolute top-2 right-2 rounded bg-black/75 hover:bg-black border border-cyan-400/40 px-2 py-0.5 text-[10px] font-mono text-cyan-200 shadow cursor-pointer"
+                title="Clique para resetar zoom"
+              >
+                {Math.round(stageZoom.zoom * 100)}% · Resetar
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-1 pt-0.5">
+            <button
+              type="button"
+              onClick={() => setIsPlaying((p) => !p)}
+              className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+            >
+              {isPlaying ? <Pause className="w-2.5 h-2.5 fill-current" /> : <Play className="w-2.5 h-2.5 fill-current" />}
+              {isPlaying ? 'PAUSAR' : 'PLAY'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setCurrentTime(0);
+              }}
+              className="h-5 px-2 rounded bg-[#1A1E28] hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+            >
+              <Square className="w-2.5 h-2.5 fill-current" />
+              STOP
+            </button>
+          </div>
+          <div className="text-[10px] text-slate-400 px-1 flex flex-wrap items-center justify-between gap-1.5">
             <span>
-              Arraste imagens e vídeos com o dedo ou mouse · Cantos âmbar para redimensionar · Pino ciano para girar
+              Arraste com o dedo ou mouse · Scroll/Pinça dá zoom no ponteiro ou toque
             </span>
             {selectedClip && (
               <span className="font-mono text-amber-300">
@@ -1400,8 +1808,8 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               </span>
             )}
           </div>
-          <div className="flex items-center gap-3 px-1">
-            <span className="text-xs font-mono text-slate-400 w-12">
+          <div className="flex items-center gap-2 px-1">
+            <span className="text-[10px] font-mono text-slate-400 w-10">
               {currentTime.toFixed(1)}s
             </span>
             <input
@@ -1416,14 +1824,14 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               }}
               className="flex-1 accent-amber-500"
             />
-            <span className="text-xs font-mono text-slate-400 w-12 text-right">
+            <span className="text-[10px] font-mono text-slate-400 w-10 text-right">
               {totalDuration.toFixed(1)}s
             </span>
           </div>
         </div>
 
         {/* Right Clip / Audio Inspector */}
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3.5 max-h-[640px] overflow-y-auto">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2.5 max-h-[540px] overflow-y-auto">
           {selectedAudioClip ? (
             <>
               <div className="flex items-center justify-between pb-2 border-b border-white/8">
@@ -1600,21 +2008,21 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
                   onClick={() => duplicateSelectedClip(true)}
-                  className="min-h-[36px] px-2.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-[11px] font-semibold text-amber-200 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="h-7 px-2 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-[10px] font-semibold text-amber-200 inline-flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <Copy className="w-3.5 h-3.5 shrink-0" />
-                  Duplicar no Vídeo Principal
+                  <Copy className="w-3 h-3 shrink-0" />
+                  Duplicar Principal
                 </button>
                 <button
                   type="button"
                   onClick={deleteSelectedFromTimeline}
-                  className="min-h-[36px] px-2.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 border border-red-500/35 text-[11px] font-semibold text-red-300 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="h-7 px-2 rounded-md bg-red-500/15 hover:bg-red-500/25 border border-red-500/35 text-[10px] font-semibold text-red-300 inline-flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                  <Trash2 className="w-3 h-3 shrink-0" />
                   Apagar Clipe
                 </button>
               </div>
@@ -1623,18 +2031,18 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 <button
                   type="button"
                   onClick={insertSelectedIntoMainVideoTrack}
-                  className="w-full min-h-[36px] px-3 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[11px] font-semibold text-cyan-200 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="w-full h-7 px-2.5 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[10px] font-semibold text-cyan-200 inline-flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
-                  Inserir no Vídeo Principal (no Cursor)
+                  <ArrowDownToLine className="w-3 h-3 shrink-0" />
+                  Inserir no Vídeo Principal
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={createOverlayFromSelected}
-                  className="w-full min-h-[36px] px-3 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[11px] font-semibold text-cyan-200 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="w-full h-7 px-2.5 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[10px] font-semibold text-cyan-200 inline-flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <Layers className="w-3.5 h-3.5 shrink-0" />
+                  <Layers className="w-3 h-3 shrink-0" />
                   Criar Sobreposição deste Vídeo
                 </button>
               )}
@@ -1847,187 +2255,352 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         </div>
       </div>
 
-      {/* Multi-Track Timeline (Video, Overlay & Audio) */}
-      <div
-        onPointerMove={handleTimelinePointerMove}
-        onPointerUp={handleTimelinePointerUp}
-        onPointerCancel={handleTimelinePointerUp}
-        className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3 overflow-x-auto"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-semibold text-slate-300">
-            Linha do Tempo Multipista (Vídeo, Sobreposição e Áudio)
-          </span>
-          <span className="text-[11px] text-slate-400">
-            Toque em um vídeo para duplicar, inserir no Vídeo Principal ou apagar · Arraste para mover
-          </span>
-        </div>
-
-        {(selectedClip || selectedAudioClip) && (
-          <div className="rounded-lg bg-[#1A1E28] border border-amber-500/30 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs font-semibold text-white truncate">
-              Selecionado:{' '}
-              <span className="text-amber-300">
-                {selectedClip ? selectedClip.name : selectedAudioClip?.name}
-              </span>
-            </span>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => duplicateSelectedClip(false)}
-                className="min-h-[34px] px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                Duplicar na Mesma Pista
-              </button>
-              {selectedClip && (
-                <>
-                  <button
-                    type="button"
-                    onClick={insertSelectedIntoMainVideoTrack}
-                    className="min-h-[34px] px-3 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs font-semibold text-cyan-200 inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <ArrowDownToLine className="w-3.5 h-3.5" />
-                    {selectedClip.track === 'video'
-                      ? 'Duplicar e Inserir no Vídeo Principal'
-                      : 'Inserir no Vídeo Principal'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={createOverlayFromSelected}
-                    className="min-h-[34px] px-3 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/40 text-xs font-semibold text-purple-200 inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Layers className="w-3.5 h-3.5" />
-                    Criar Sobreposição
-                  </button>
-                </>
-              )}
-              <button
-                type="button"
-                onClick={splitSelectedClipAtPlayhead}
-                className="min-h-[34px] px-3 rounded-lg bg-[#0B0D11] hover:bg-white/10 border border-white/15 text-xs font-medium text-cyan-300 inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <Scissors className="w-3.5 h-3.5" />
-                Dividir
-              </button>
-              <button
-                type="button"
-                onClick={deleteSelectedFromTimeline}
-                className="min-h-[34px] px-3 rounded-lg bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-xs font-semibold text-red-200 inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Apagar
-              </button>
-            </div>
+      {/* Multi-Track Retractable Aerial Timeline (40px tracks) */}
+      <AerialTimeline
+        title="Linha do Tempo Multipista"
+        subtitle={`${formatDuration(currentTime)} / ${formatDuration(totalDuration)}`}
+        headerExtra={
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setIsPlaying((p) => !p)}
+              className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+              title={isPlaying ? 'Pausar reprodução' : 'Reproduzir linha do tempo'}
+            >
+              {isPlaying ? <Pause className="w-2.5 h-2.5 fill-current" /> : <Play className="w-2.5 h-2.5 fill-current" />}
+              {isPlaying ? 'PAUSAR' : 'PLAY'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setCurrentTime(0);
+              }}
+              className="h-5 px-2 rounded bg-[#1A1E28] hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+              title="Parar e voltar ao início"
+            >
+              <Square className="w-2.5 h-2.5 fill-current" />
+              STOP
+            </button>
           </div>
-        )}
-
-        {(['overlay', 'video'] as const).map((trackName) => {
-          const trackClips = project.videoClips.filter((c) => c.track === trackName);
-          return (
-            <div key={trackName} className="flex items-center gap-3 min-w-[640px]">
-              <span
-                className={`w-28 text-[11px] font-medium shrink-0 inline-flex items-center gap-1.5 ${
-                  trackName === 'overlay' ? 'text-cyan-300' : 'text-slate-300'
-                }`}
-              >
-                {trackName === 'overlay' && <Layers className="w-3.5 h-3.5" />}
-                {trackName === 'overlay' ? 'Sobreposição' : 'Vídeo Principal'}
-              </span>
+        }
+      >
+        <div
+          onPointerMove={handleTimelinePointerMove}
+          onPointerUp={handleTimelinePointerUp}
+          onPointerCancel={handleTimelinePointerUp}
+          className="space-y-1.5 overflow-x-auto"
+        >
+          {/* Floating / Anchored Cut Menu right at the clicked spot on video or audio */}
+          {cutAnchor && (
+            <div className="min-w-[540px] relative h-8">
               <div
-                onPointerDown={(e) => {
-                  if (e.target !== e.currentTarget) return;
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-                  setIsPlaying(false);
-                  setCurrentTime(Number((ratio * totalDuration).toFixed(2)));
+                style={{
+                  left: `${Math.max(0, Math.min(28, (cutAnchor.time / totalDuration) * 100))}%`,
                 }}
-                className={`flex-1 h-14 rounded-lg bg-[#0B0D11] border relative overflow-hidden ${
-                  trackName === 'overlay' ? 'border-cyan-500/25' : 'border-white/8'
-                }`}
+                className="absolute top-0 inline-flex items-center gap-1 rounded-lg bg-[#1A1E28] border border-rose-400/60 shadow-lg px-2 py-1 z-30 max-w-full"
               >
-                {trackName === 'overlay' && trackClips.length === 0 && (
-                  <div className="h-full flex items-center px-3 text-[11px] text-slate-500 pointer-events-none">
-                    Use &ldquo;+ Criar Sobreposição&rdquo; à esquerda para sobrepor vídeos, GIFs, imagens ou textos
-                  </div>
-                )}
-                {trackClips.map((clip) => {
-                  const leftPct = (clip.startTime / totalDuration) * 100;
-                  const widthPct = Math.max(
-                    4,
-                    (clip.duration / Math.max(0.25, clip.speed) / totalDuration) * 100
-                  );
-                  const active = clip.id === selectedClipId;
-                  return (
+                <span className="text-[10px] font-mono font-bold text-rose-300 inline-flex items-center gap-1 shrink-0">
+                  <Scissors className="w-3 h-3" />
+                  {cutAnchor.time.toFixed(1)}s
+                </span>
+                <button
+                  type="button"
+                  onClick={() => splitClipAtTime(cutAnchor.kind, cutAnchor.clipId, cutAnchor.time)}
+                  className="h-5 px-1.5 rounded bg-rose-500 hover:bg-rose-400 text-[10px] font-bold text-white inline-flex items-center gap-1 cursor-pointer shrink-0"
+                  title="Cortar e dividir em 2 partes neste ponto"
+                >
+                  <Scissors className="w-2.5 h-2.5" />
+                  Cortar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => trimClipBeforeTime(cutAnchor.kind, cutAnchor.clipId, cutAnchor.time)}
+                  className="h-5 px-1.5 rounded bg-[#0B0D11] hover:bg-white/10 border border-white/15 text-[10px] font-medium text-amber-300 cursor-pointer shrink-0"
+                  title="Cortar fora a parte antes deste ponto"
+                >
+                  Cortar Início
+                </button>
+                <button
+                  type="button"
+                  onClick={() => trimClipAfterTime(cutAnchor.kind, cutAnchor.clipId, cutAnchor.time)}
+                  className="h-5 px-1.5 rounded bg-[#0B0D11] hover:bg-white/10 border border-white/15 text-[10px] font-medium text-amber-300 cursor-pointer shrink-0"
+                  title="Cortar fora a parte depois deste ponto"
+                >
+                  Cortar Fim
+                </button>
+                <button
+                  type="button"
+                  onClick={() => duplicateSelectedClip(false)}
+                  className="h-5 px-1.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-[10px] font-semibold text-amber-200 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <Copy className="w-2.5 h-2.5" />
+                  Duplicar
+                </button>
+                {cutAnchor.kind === 'video' && selectedClip && (
+                  <>
                     <button
-                      key={clip.id}
                       type="button"
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        setSelectedClipId(clip.id);
-                        setSelectedAudioClipId(null);
-                        const trackEl = e.currentTarget.parentElement;
-                        timelineDragRef.current = {
-                          active: true,
-                          kind: 'video',
-                          mode: 'move',
-                          clipId: clip.id,
-                          startClientX: e.clientX,
-                          origStartTime: clip.startTime,
-                          origTrimStart: clip.trimStart,
-                          origDuration: clip.duration,
-                          sourceDuration: clip.duration,
-                          speed: clip.speed,
-                          trackWidthPx: trackEl?.getBoundingClientRect().width || 400,
-                        };
-                        e.currentTarget.setPointerCapture(e.pointerId);
-                      }}
-                      style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                      className={`absolute top-1.5 bottom-1.5 rounded-md px-2 text-left truncate text-[11px] font-medium border touch-none select-none cursor-grab active:cursor-grabbing ${
-                        active
-                          ? trackName === 'overlay'
-                            ? 'bg-cyan-400 text-slate-950 border-cyan-200 font-bold'
-                            : 'bg-amber-500 text-slate-950 border-amber-300 font-bold'
-                          : trackName === 'overlay'
-                          ? 'bg-cyan-950/75 text-cyan-200 border-cyan-500/35 hover:border-cyan-400'
-                          : 'bg-[#1E2534] text-slate-200 border-white/15 hover:border-amber-400/50'
-                      }`}
+                      onClick={insertSelectedIntoMainVideoTrack}
+                      className="h-5 px-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-[10px] font-semibold text-cyan-200 inline-flex items-center gap-1 cursor-pointer shrink-0"
                     >
-                      {clip.name}
+                      <ArrowDownToLine className="w-2.5 h-2.5" />
+                      {selectedClip.track === 'video' ? 'Dup. Principal' : 'Principal'}
                     </button>
-                  );
-                })}
-                {/* Playhead line */}
-                <div
-                  style={{ left: `${(currentTime / totalDuration) * 100}%` }}
-                  className="absolute top-0 bottom-0 w-0.5 bg-cyan-400 pointer-events-none"
-                />
+                    <button
+                      type="button"
+                      onClick={createOverlayFromSelected}
+                      className="h-5 px-1.5 rounded bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/40 text-[10px] font-semibold text-purple-200 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      <Layers className="w-2.5 h-2.5" />
+                      Sobrepor
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={deleteSelectedFromTimeline}
+                  className="h-5 px-1.5 rounded bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-[10px] font-semibold text-red-200 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <Trash2 className="w-2.5 h-2.5" />
+                  Apagar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsPlaying((p) => !p)}
+                  className="h-5 px-1.5 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                  title={isPlaying ? 'Pausar reprodução' : 'Reproduzir a partir deste ponto'}
+                >
+                  {isPlaying ? <Pause className="w-2.5 h-2.5 fill-current" /> : <Play className="w-2.5 h-2.5 fill-current" />}
+                  {isPlaying ? 'PAUSAR' : 'PLAY'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPlaying(false);
+                    setCurrentTime(0);
+                  }}
+                  className="h-5 px-1.5 rounded bg-[#0B0D11] hover:bg-white/10 border border-white/15 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer shrink-0"
+                  title="Parar e voltar ao início"
+                >
+                  <Square className="w-2.5 h-2.5 fill-current" />
+                  STOP
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCutAnchor(null)}
+                  className="h-5 w-5 rounded text-slate-400 hover:text-white inline-flex items-center justify-center cursor-pointer shrink-0"
+                  title="Fechar opções de corte"
+                >
+                  <X className="w-3 h-3" />
+                </button>
               </div>
             </div>
-          );
-        })}
+          )}
 
-        {/* Audio Track */}
-            <div className="flex items-center gap-3 min-w-[640px]">
-          <span className="w-28 text-[11px] font-medium text-emerald-300 shrink-0 inline-flex items-center gap-1.5">
-            <Music className="w-3.5 h-3.5" />
-            Áudio / Música
-          </span>
-          <div
-            onPointerDown={(e) => {
-              if (e.target !== e.currentTarget) return;
-              const rect = e.currentTarget.getBoundingClientRect();
-              const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-              setIsPlaying(false);
-              setCurrentTime(Number((ratio * totalDuration).toFixed(2)));
-            }}
-            className="flex-1 h-16 rounded-lg bg-[#0B0D11] border border-emerald-500/20 relative overflow-hidden"
-          >
-            {project.audioClips.length === 0 ? (
-              <div className="h-full flex items-center px-3 text-[11px] text-slate-500 pointer-events-none">
-                Nenhum áudio adicionado — use a aba &ldquo;Áudio&rdquo; à esquerda para importar ou adicionar músicas
+          {!cutAnchor && (selectedClip || selectedAudioClip) && (
+            <div className="rounded-lg bg-[#1A1E28] border border-amber-500/30 px-2.5 py-1 flex flex-wrap items-center justify-between gap-1.5">
+              <span className="text-[10px] font-semibold text-white truncate">
+                Clique em qualquer parte do vídeo ou áudio na pista para cortar ·{' '}
+                <span className="text-amber-300">
+                  {selectedClip ? selectedClip.name : selectedAudioClip?.name}
+                </span>
+              </span>
+              <div className="flex flex-wrap items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => duplicateSelectedClip(false)}
+                  className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Copy className="w-2.5 h-2.5" />
+                  Duplicar
+                </button>
+                {selectedClip && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={insertSelectedIntoMainVideoTrack}
+                      className="h-5 px-2 rounded bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-[10px] font-semibold text-cyan-200 inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <ArrowDownToLine className="w-2.5 h-2.5" />
+                      {selectedClip.track === 'video' ? 'Duplicar Principal' : 'Vídeo Principal'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={createOverlayFromSelected}
+                      className="h-5 px-2 rounded bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/40 text-[10px] font-semibold text-purple-200 inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Layers className="w-2.5 h-2.5" />
+                      Sobreposição
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={splitSelectedClipAtPlayhead}
+                  className="h-5 px-2 rounded bg-[#0B0D11] hover:bg-white/10 border border-white/15 text-[10px] font-medium text-cyan-300 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Scissors className="w-2.5 h-2.5" />
+                  Cortar
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedFromTimeline}
+                  className="h-5 px-2 rounded bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-[10px] font-semibold text-red-200 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Trash2 className="w-2.5 h-2.5" />
+                  Apagar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsPlaying((p) => !p)}
+                  className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+                  title={isPlaying ? 'Pausar reprodução' : 'Reproduzir linha do tempo'}
+                >
+                  {isPlaying ? <Pause className="w-2.5 h-2.5 fill-current" /> : <Play className="w-2.5 h-2.5 fill-current" />}
+                  {isPlaying ? 'PAUSAR' : 'PLAY'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPlaying(false);
+                    setCurrentTime(0);
+                  }}
+                  className="h-5 px-2 rounded bg-[#0B0D11] hover:bg-white/10 border border-white/15 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+                  title="Parar e voltar ao início"
+                >
+                  <Square className="w-2.5 h-2.5 fill-current" />
+                  STOP
+                </button>
               </div>
-            ) : (
+            </div>
+          )}
+
+          {(['overlay', 'video'] as const).map((trackName) => {
+            const trackClips = project.videoClips.filter((c) => c.track === trackName);
+            return (
+              <div key={trackName} className="flex items-center gap-2 min-w-[540px]">
+                <span
+                  className={`w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 ${
+                    trackName === 'overlay' ? 'text-cyan-300' : 'text-slate-300'
+                  }`}
+                >
+                  {trackName === 'overlay' && <Layers className="w-3 h-3" />}
+                  {trackName === 'overlay' ? 'Sobreposição' : 'Vídeo Principal'}
+                </span>
+                <div
+                  onPointerDown={(e) => {
+                    if (e.target !== e.currentTarget) return;
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+                    setIsPlaying(false);
+                    setCurrentTime(Number((ratio * totalDuration).toFixed(2)));
+                    setCutAnchor(null);
+                  }}
+                  className={`flex-1 h-10 rounded-md bg-[#0B0D11] border relative overflow-hidden ${
+                    trackName === 'overlay' ? 'border-cyan-500/25' : 'border-white/8'
+                  }`}
+                >
+                  {trackName === 'overlay' && trackClips.length === 0 && (
+                    <div className="h-full flex items-center px-2.5 text-[10px] text-slate-500 pointer-events-none">
+                      Use &ldquo;+ Criar Sobreposição&rdquo; para sobrepor vídeos, GIFs ou imagens
+                    </div>
+                  )}
+                  {trackClips.map((clip) => {
+                    const leftPct = (clip.startTime / totalDuration) * 100;
+                    const widthPct = Math.max(
+                      4,
+                      (clip.duration / Math.max(0.25, clip.speed) / totalDuration) * 100
+                    );
+                    const active = clip.id === selectedClipId;
+                    const clipEnd = clip.startTime + clip.duration / Math.max(0.25, clip.speed);
+                    return (
+                      <button
+                        key={clip.id}
+                        type="button"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          setSelectedClipId(clip.id);
+                          setSelectedAudioClipId(null);
+                          const trackEl = e.currentTarget.parentElement;
+                          const rect = trackEl?.getBoundingClientRect();
+                          const rawTime = rect
+                            ? ((e.clientX - rect.left) / Math.max(1, rect.width)) * totalDuration
+                            : clip.startTime;
+                          const safeClickTime = Number(
+                            Math.max(clip.startTime, Math.min(clipEnd, rawTime)).toFixed(2)
+                          );
+                          timelineDragRef.current = {
+                            active: true,
+                            moved: false,
+                            kind: 'video',
+                            track: trackName,
+                            mode: 'move',
+                            clipId: clip.id,
+                            startClientX: e.clientX,
+                            clickTime: safeClickTime,
+                            origStartTime: clip.startTime,
+                            origTrimStart: clip.trimStart,
+                            origDuration: clip.duration,
+                            sourceDuration: clip.duration,
+                            speed: clip.speed,
+                            trackWidthPx: rect?.width || 400,
+                          };
+                        }}
+                        style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                        className={`absolute top-1 bottom-1 rounded px-1.5 text-left truncate text-[10px] font-medium border touch-none select-none cursor-pointer ${
+                          active
+                            ? trackName === 'overlay'
+                              ? 'bg-cyan-400 text-slate-950 border-cyan-200 font-bold'
+                              : 'bg-amber-500 text-slate-950 border-amber-300 font-bold'
+                            : trackName === 'overlay'
+                            ? 'bg-cyan-950/75 text-cyan-200 border-cyan-500/35 hover:border-cyan-400'
+                            : 'bg-[#1E2534] text-slate-200 border-white/15 hover:border-amber-400/50'
+                        }`}
+                        title="Clique em qualquer ponto para cortar ou arraste para mover"
+                      >
+                        {clip.name}
+                      </button>
+                    );
+                  })}
+                  {cutAnchor && cutAnchor.track === trackName && (
+                    <div
+                      style={{ left: `${(cutAnchor.time / totalDuration) * 100}%` }}
+                      className="absolute top-0 bottom-0 w-0.5 bg-rose-400 pointer-events-none z-20"
+                    />
+                  )}
+                  {/* Playhead line */}
+                  <div
+                    style={{ left: `${(currentTime / totalDuration) * 100}%` }}
+                    className="absolute top-0 bottom-0 w-0.5 bg-cyan-400 pointer-events-none"
+                  />
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Audio Track (40px) */}
+          <div className="flex items-center gap-2 min-w-[540px]">
+            <span className="w-24 text-[10px] font-medium text-emerald-300 shrink-0 inline-flex items-center gap-1">
+              <Music className="w-3 h-3" />
+              Áudio / Música
+            </span>
+            <div
+              onPointerDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                const rect = e.currentTarget.getBoundingClientRect();
+                const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+                setIsPlaying(false);
+                setCurrentTime(Number((ratio * totalDuration).toFixed(2)));
+                setCutAnchor(null);
+              }}
+              className="flex-1 h-10 rounded-md bg-[#0B0D11] border border-emerald-500/20 relative overflow-hidden"
+            >
+              {project.audioClips.length === 0 ? (
+                <div className="h-full flex items-center px-2.5 text-[10px] text-slate-500 pointer-events-none">
+                  Use a aba &ldquo;Áudio&rdquo; à esquerda para importar ou adicionar músicas
+                </div>
+              ) : (
               project.audioClips.map((aclip) => {
                 const leftPct = (aclip.startTime / totalDuration) * 100;
                 const widthPct = Math.max(
@@ -2036,6 +2609,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 );
                 const active = aclip.id === selectedAudioClipId;
                 const srcTotal = Math.max(0.2, aclip.sourceDuration || aclip.duration);
+                const clipEnd = aclip.startTime + aclip.duration / Math.max(0.25, aclip.speed);
                 const startIdx = Math.floor(
                   (aclip.trimStart / srcTotal) * aclip.peaks.length
                 );
@@ -2056,29 +2630,39 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                       setSelectedAudioClipId(aclip.id);
                       setSelectedClipId(null);
                       const trackEl = e.currentTarget.parentElement;
+                      const rect = trackEl?.getBoundingClientRect();
+                      const rawTime = rect
+                        ? ((e.clientX - rect.left) / Math.max(1, rect.width)) * totalDuration
+                        : aclip.startTime;
+                      const safeClickTime = Number(
+                        Math.max(aclip.startTime, Math.min(clipEnd, rawTime)).toFixed(2)
+                      );
                       timelineDragRef.current = {
                         active: true,
+                        moved: false,
                         kind: 'audio',
+                        track: 'audio',
                         mode: 'move',
                         clipId: aclip.id,
                         startClientX: e.clientX,
+                        clickTime: safeClickTime,
                         origStartTime: aclip.startTime,
                         origTrimStart: aclip.trimStart,
                         origDuration: aclip.duration,
                         sourceDuration: srcTotal,
                         speed: aclip.speed,
-                        trackWidthPx: trackEl?.getBoundingClientRect().width || 400,
+                        trackWidthPx: rect?.width || 400,
                       };
-                      e.currentTarget.setPointerCapture(e.pointerId);
                     }}
                     style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                    className={`group absolute top-1.5 bottom-1.5 rounded-md overflow-hidden border touch-none select-none cursor-grab active:cursor-grabbing ${
+                    className={`group absolute top-1.5 bottom-1.5 rounded-md overflow-hidden border touch-none select-none cursor-pointer ${
                       active
                         ? 'bg-emerald-500/25 text-emerald-100 border-emerald-400 font-bold'
                         : aclip.muted
                         ? 'bg-slate-800/80 text-slate-400 border-white/10 line-through'
                         : 'bg-emerald-950/85 text-emerald-200 border-emerald-500/40 hover:border-emerald-400'
                     }`}
+                    title="Clique em qualquer ponto para cortar ou arraste para mover"
                   >
                     {/* Live trimmed waveform */}
                     <div className="absolute inset-x-3 inset-y-1 flex items-center gap-[1px] opacity-65 pointer-events-none">
@@ -2113,10 +2697,13 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                         const trackEl = e.currentTarget.parentElement?.parentElement;
                         timelineDragRef.current = {
                           active: true,
+                          moved: false,
                           kind: 'audio',
+                          track: 'audio',
                           mode: 'trim-left',
                           clipId: aclip.id,
                           startClientX: e.clientX,
+                          clickTime: aclip.startTime,
                           origStartTime: aclip.startTime,
                           origTrimStart: aclip.trimStart,
                           origDuration: aclip.duration,
@@ -2142,10 +2729,13 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                         const trackEl = e.currentTarget.parentElement?.parentElement;
                         timelineDragRef.current = {
                           active: true,
+                          moved: false,
                           kind: 'audio',
+                          track: 'audio',
                           mode: 'trim-right',
                           clipId: aclip.id,
                           startClientX: e.clientX,
+                          clickTime: clipEnd,
                           origStartTime: aclip.startTime,
                           origTrimStart: aclip.trimStart,
                           origDuration: aclip.duration,
@@ -2163,13 +2753,20 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 );
               })
             )}
+            {cutAnchor && cutAnchor.track === 'audio' && (
+              <div
+                style={{ left: `${(cutAnchor.time / totalDuration) * 100}%` }}
+                className="absolute top-0 bottom-0 w-0.5 bg-rose-400 pointer-events-none z-20"
+              />
+            )}
             <div
               style={{ left: `${(currentTime / totalDuration) * 100}%` }}
               className="absolute top-0 bottom-0 w-0.5 bg-cyan-400 pointer-events-none z-30"
             />
           </div>
         </div>
-      </div>
+        </div>
+      </AerialTimeline>
     </div>
   );
 };

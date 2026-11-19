@@ -6,6 +6,7 @@ import {
   Film,
   Download,
   ArrowLeft,
+  ArrowRightLeft,
 } from 'lucide-react';
 import {
   CustomFolder,
@@ -21,7 +22,6 @@ import {
   createBlankProject,
   createStarterProject,
   localDb,
-  resizeProjectDimensions,
 } from './storage/localDb';
 import {
   ensureStudioBackgroundLoaded,
@@ -40,8 +40,14 @@ import { AnimatedTextView } from './components/views/AnimatedTextView';
 import { GalleryView } from './components/views/GalleryView';
 import { SavedProjectsView } from './components/views/SavedProjectsView';
 import { ExportView } from './components/views/ExportView';
+import { ConverterView } from './components/views/ConverterView';
 import { SettingsView } from './components/views/SettingsView';
-import { decodeAudioBlob } from './utils/audioEngine';
+import { LeftWallVolume } from './components/LeftWallVolume';
+import {
+  decodeAudioBlob,
+  getEffectiveMasterVolume,
+  subscribeMasterVolume,
+} from './utils/audioEngine';
 import { DecodedGif, decodeAnimatedGifBlob } from './utils/gifDecoder';
 
 export default function App() {
@@ -80,23 +86,16 @@ export default function App() {
           await localDb.saveProject(starter);
           projs = [starter];
         } else {
-          const migrated: StudioProject[] = [];
+          const hydrated: StudioProject[] = [];
           for (const p of projs) {
-            const normalized =
-              p.width !== 1080 || p.height !== 1920
-                ? resizeProjectDimensions(p, 1080, 1920)
-                : p;
-            const thumb = generateProjectThumbnail(normalized, imageCacheRef.current);
+            const thumb = generateProjectThumbnail(p, imageCacheRef.current);
             const updatedProj = {
-              ...normalized,
-              thumbnailDataUrl: thumb || normalized.thumbnailDataUrl,
+              ...p,
+              thumbnailDataUrl: thumb || p.thumbnailDataUrl,
             };
-            if (p.width !== 1080 || p.height !== 1920 || thumb) {
-              await localDb.saveProject(updatedProj);
-            }
-            migrated.push(updatedProj);
+            hydrated.push(updatedProj);
           }
-          projs = migrated;
+          projs = hydrated;
         }
 
         if (!mounted) return;
@@ -157,6 +156,19 @@ export default function App() {
     });
   }, [mediaFiles]);
 
+  // Sync master volume & mute state across all cached HTMLVideoElements in real time
+  useEffect(() => {
+    const applyMasterToVideos = () => {
+      const vol = getEffectiveMasterVolume();
+      videoCacheRef.current.forEach((v) => {
+        v.volume = vol;
+        v.muted = vol <= 0.001;
+      });
+    };
+    applyMasterToVideos();
+    return subscribeMasterVolume(applyMasterToVideos);
+  }, []);
+
   // Auto-save active project periodically
   useEffect(() => {
     if (!activeProject) return;
@@ -202,8 +214,8 @@ export default function App() {
   }) => {
     const created = createBlankProject(
       config.name,
-      1080,
-      1920,
+      config.width,
+      config.height,
       config.fps,
       config.targetView
     );
@@ -271,6 +283,16 @@ export default function App() {
       }
     }
     setMediaFiles((prev) => prev.filter((m) => !ids.includes(m.id)));
+    if (activeProject) {
+      const idSet = new Set(ids);
+      const cleaned: StudioProject = {
+        ...activeProject,
+        layers: activeProject.layers.filter((l) => !l.mediaId || !idSet.has(l.mediaId)),
+        videoClips: activeProject.videoClips.filter((c) => !c.mediaId || !idSet.has(c.mediaId)),
+        audioClips: activeProject.audioClips.filter((a) => !idSet.has(a.mediaId)),
+      };
+      setActiveProject(cleaned);
+    }
   };
 
   const handleCreateCustomFolder = async (name: string) => {
@@ -466,34 +488,35 @@ export default function App() {
   const currentProject = activeProject || createStarterProject();
 
   return (
-    <div className="min-h-screen bg-[#0B0D11] text-[#F1F5F9] flex flex-col">
-      {/* Top Bar Contract: [Brand title] — [4-5 nav links] — [1 primary CTA] */}
-      <header className="sticky top-0 z-40 h-14 bg-[#0B0D11]/95 backdrop-blur-md border-b border-white/8 px-4 sm:px-6 flex items-center justify-between gap-8">
-        <div className="flex items-center gap-3 min-w-0">
+    <div className="min-h-screen bg-[#0B0D11] text-[#F1F5F9] flex flex-col overflow-x-hidden">
+      {/* Compact Top Bar */}
+      <header className="sticky top-0 z-40 h-11 bg-[#0B0D11]/95 backdrop-blur-md border-b border-white/8 px-3 sm:px-5 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
           {view !== 'home' && (
             <button
               onClick={() => navigate('home')}
-              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors lg:hidden cursor-pointer"
+              className="h-7 w-7 flex items-center justify-center rounded-md text-slate-300 hover:text-white hover:bg-white/10 transition-colors lg:hidden cursor-pointer"
               aria-label="Voltar ao Início"
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="w-3.5 h-3.5" />
             </button>
           )}
           <button
             onClick={() => navigate('home')}
-            className="text-base sm:text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0 cursor-pointer"
+            className="text-sm font-bold tracking-tight text-white whitespace-nowrap shrink-0 cursor-pointer"
           >
             Super Animator Studio
           </button>
         </div>
 
-        <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-300">
+        <nav className="hidden lg:flex items-center gap-5 text-xs font-medium text-slate-300">
           {[
             { id: 'home', label: 'Início' },
             { id: 'files', label: 'Arquivos' },
             { id: 'animation', label: 'Animação' },
             { id: 'video', label: 'Vídeo' },
             { id: 'audio', label: 'Áudio' },
+            { id: 'converter', label: 'Converter' },
           ].map((item) => (
             <button
               key={item.id}
@@ -513,14 +536,14 @@ export default function App() {
           {view === 'home' ? (
             <button
               onClick={() => setShowNewModal(true)}
-              className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="h-7 px-2.5 rounded-md bg-amber-500 hover:bg-amber-400 text-[11px] font-bold text-slate-950 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Novo Projeto
             </button>
           ) : (
             <button
               onClick={() => navigate('export')}
-              className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="h-7 px-2.5 rounded-md bg-amber-500 hover:bg-amber-400 text-[11px] font-bold text-slate-950 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Exportar Vídeo
             </button>
@@ -529,7 +552,7 @@ export default function App() {
       </header>
 
       {/* Main Viewport */}
-      <main className="flex-1">
+      <main className="flex-1 min-w-0">
         {loading ? (
           <div className="max-w-7xl mx-auto px-6 py-16 text-center text-sm text-slate-400">
             Carregando armazenamento local do estúdio...
@@ -575,6 +598,7 @@ export default function App() {
                 onUpdateProject={handleUpdateProject}
                 onSaveProject={handleSaveCurrentProject}
                 onImportMedia={handleImportMedia}
+                onDeleteMedia={handleDeleteMedia}
               />
             )}
 
@@ -588,6 +612,7 @@ export default function App() {
                 onUpdateProject={handleUpdateProject}
                 onSaveProject={handleSaveCurrentProject}
                 onImportMedia={handleImportMedia}
+                onDeleteMedia={handleDeleteMedia}
                 onOpenExport={() => navigate('export')}
               />
             )}
@@ -598,6 +623,7 @@ export default function App() {
                 mediaFiles={mediaFiles}
                 onUpdateProject={handleUpdateProject}
                 onImportMedia={handleImportMedia}
+                onDeleteMedia={handleDeleteMedia}
                 onSaveToGallery={handleSaveToGallery}
               />
             )}
@@ -665,6 +691,15 @@ export default function App() {
               />
             )}
 
+            {view === 'converter' && (
+              <ConverterView
+                mediaFiles={mediaFiles}
+                onImportMedia={handleImportMedia}
+                onDeleteMedia={handleDeleteMedia}
+                onSaveToGallery={handleSaveToGallery}
+              />
+            )}
+
             {view === 'settings' && (
               <SettingsView
                 settings={settings}
@@ -677,12 +712,13 @@ export default function App() {
       </main>
 
       {/* Mobile Android Thumb-Zone Bottom Bar */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 h-14 bg-[#0B0D11]/95 backdrop-blur-md border-t border-white/10 grid grid-cols-5 items-center">
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 h-12 bg-[#0B0D11]/95 backdrop-blur-md border-t border-white/10 grid grid-cols-6 items-center">
         {[
           { id: 'home', label: 'Início', icon: Home },
           { id: 'files', label: 'Arquivos', icon: FolderOpen },
           { id: 'animation', label: 'Animação', icon: Clapperboard },
           { id: 'video', label: 'Vídeo', icon: Film },
+          { id: 'converter', label: 'Converter', icon: ArrowRightLeft },
           { id: 'export', label: 'Exportar', icon: Download },
         ].map((tab) => {
           const Icon = tab.icon;
@@ -695,12 +731,14 @@ export default function App() {
                 active ? 'text-amber-400' : 'text-slate-400'
               }`}
             >
-              <Icon className="w-4 h-4" />
-              <span className="text-[10px] font-medium">{tab.label}</span>
+              <Icon className="w-3.5 h-3.5" />
+              <span className="text-[9px] font-medium">{tab.label}</span>
             </button>
           );
         })}
       </nav>
+
+      <LeftWallVolume />
 
       <NewProjectModal
         open={showNewModal}

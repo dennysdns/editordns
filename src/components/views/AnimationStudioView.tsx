@@ -31,7 +31,11 @@ import {
   ZoomIn,
   ZoomOut,
   Clock,
+  FolderOpen,
+  X,
+  RotateCcw,
 } from 'lucide-react';
+import { useStageZoom } from '../../hooks/useStageZoom';
 import {
   AnimationFrame,
   AnimationLayer,
@@ -53,7 +57,12 @@ import {
   STUDIO_BACKGROUND_IMAGE_URL,
 } from '../../utils/canvasRenderer';
 import { ALL_ACCEPTED_EXTENSIONS, processImportedFile } from '../../utils/mediaImporter';
+import { getEffectiveMasterVolume } from '../../utils/audioEngine';
 import { DecodedGif } from '../../utils/gifDecoder';
+import { AerialTimeline } from '../AerialTimeline';
+import { STAGE_RESOLUTIONS, getAspectLabel } from '../../utils/resolutionPresets';
+import { resizeProjectDimensions } from '../../storage/localDb';
+import { createLocalFolderSamples } from '../../utils/localSamples';
 
 interface AnimationStudioViewProps {
   project: StudioProject;
@@ -65,6 +74,7 @@ interface AnimationStudioViewProps {
   onUpdateProject: (updated: StudioProject) => void;
   onSaveProject: () => Promise<void>;
   onImportMedia: (files: MediaFile[]) => Promise<void>;
+  onDeleteMedia: (ids: string[]) => Promise<void>;
 }
 
 const CHARACTER_OPTIONS: { id: CharacterPresetId; label: string }[] = [
@@ -95,8 +105,10 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
   onUpdateProject,
   onSaveProject,
   onImportMedia,
+  onDeleteMedia,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stageViewportRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [currentFrame, setCurrentFrame] = useState(0);
@@ -115,6 +127,29 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
   const [timelineZoom, setTimelineZoom] = useState(72);
   const [activeAddTab, setActiveAddTab] = useState<'chars' | 'shapes' | 'images' | 'fx'>('chars');
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [localFolderOpen, setLocalFolderOpen] = useState(false);
+  const [localFolderFilter, setLocalFolderFilter] = useState<'all' | 'image' | 'gif' | 'video'>('all');
+  const [generatingSamples, setGeneratingSamples] = useState(false);
+  const [isDragOverStage, setIsDragOverStage] = useState(false);
+  const [dragGhost, setDragGhost] = useState<{
+    asset: MediaFile;
+    clientX: number;
+    clientY: number;
+    overStage: boolean;
+  } | null>(null);
+  const pointerFolderDragRef = useRef<{
+    active: boolean;
+    moved: boolean;
+    asset: MediaFile | null;
+    startX: number;
+    startY: number;
+  }>({
+    active: false,
+    moved: false,
+    asset: null,
+    startX: 0,
+    startY: 0,
+  });
 
   // Drag state (move, draw, corner resize, top knob rotate)
   const dragStateRef = useRef<{
@@ -146,6 +181,15 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     origLocalY: 100,
     origRotation: 0,
     startAngle: 0,
+  });
+
+  const stageZoom = useStageZoom(stageViewportRef, {
+    minZoom: 1,
+    maxZoom: 5,
+    initialEnabled: true,
+    onPinchStart: () => {
+      dragStateRef.current.active = false;
+    },
   });
 
   const safeFrameIndex = Math.max(0, Math.min(project.frames.length - 1, currentFrame));
@@ -195,7 +239,10 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
       videoLayers.forEach((l) => {
         const vel = l.mediaId ? videoCache.get(l.mediaId) : undefined;
         if (vel) {
+          const masterVol = getEffectiveMasterVolume();
           vel.playbackRate = Math.max(0.25, Math.min(4, speedMultiplier));
+          vel.volume = masterVol;
+          vel.muted = masterVol <= 0.001;
           vel.loop = loop;
           if (vel.paused) {
             void vel.play().catch(() => {
@@ -399,6 +446,16 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (stageZoom.isMultiTouchBlocked()) return;
+
+    // Middle mouse or Alt+drag pans the zoomed stage even during playback or brush mode
+    if (e.button === 1 || (e.altKey && stageZoom.zoom > 1.01)) {
+      e.preventDefault();
+      stageZoom.startPanDrag(e.clientX, e.clientY);
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      return;
+    }
+
     if (isPlaying) return;
     const pt = toCanvasCoords(e.clientX, e.clientY);
 
@@ -518,6 +575,13 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     }
 
     if (hitLayer) {
+      if (
+        e.pointerType === 'touch' &&
+        toolMode === 'select' &&
+        stageZoom.handleTouchDoubleTapCheck(e.clientX, e.clientY, true)
+      ) {
+        return;
+      }
       setSelectedLayerId(hitLayer.id);
       const tr = interpolateLayerAtFrame(hitLayer, safeFrameIndex, project.frames.length);
       dragStateRef.current = {
@@ -531,11 +595,25 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
       };
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     } else {
-      setSelectedLayerId(null);
+      if (
+        e.pointerType === 'touch' &&
+        toolMode === 'select' &&
+        stageZoom.handleTouchDoubleTapCheck(e.clientX, e.clientY, true)
+      ) {
+        return;
+      }
+      if (stageZoom.zoom > 1.01) {
+        stageZoom.startPanDrag(e.clientX, e.clientY);
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      } else {
+        setSelectedLayerId(null);
+      }
     }
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (stageZoom.isMultiTouchBlocked()) return;
+    if (stageZoom.movePanDrag(e.clientX, e.clientY)) return;
     if (!dragStateRef.current.active) return;
     const pt = toCanvasCoords(e.clientX, e.clientY);
 
@@ -622,6 +700,12 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
   };
 
   const handlePointerUp = () => {
+    if (stageZoom.panDragRef.current.active) {
+      const moved = stageZoom.endPanDrag();
+      if (!moved) {
+        setSelectedLayerId(null);
+      }
+    }
     dragStateRef.current.active = false;
   };
 
@@ -697,7 +781,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     setToolMode('select');
   };
 
-  const addImageLayer = (mf: MediaFile) => {
+  const addImageLayer = (mf: MediaFile, dropPos?: { x: number; y: number }) => {
     const id = `layer-${Date.now()}`;
     const aspect = mf.width && mf.height ? mf.width / mf.height : 1;
     const h = 240;
@@ -721,8 +805,8 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
       keyframes: [
         {
           frameIndex: safeFrameIndex,
-          x: Math.round(project.width / 2),
-          y: Math.round(project.height / 2),
+          x: dropPos ? Math.round(dropPos.x) : Math.round(project.width / 2),
+          y: dropPos ? Math.round(dropPos.y) : Math.round(project.height / 2),
           scaleX: 1,
           scaleY: 1,
           rotation: 0,
@@ -736,7 +820,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     setToolMode('select');
   };
 
-  const addVideoLayer = (mf: MediaFile) => {
+  const addVideoLayer = (mf: MediaFile, dropPos?: { x: number; y: number }) => {
     const id = `layer-vid-${Date.now()}`;
     const aspect = mf.width && mf.height ? mf.width / mf.height : 9 / 16;
     const h = 420;
@@ -760,8 +844,8 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
       keyframes: [
         {
           frameIndex: safeFrameIndex,
-          x: Math.round(project.width / 2),
-          y: Math.round(project.height / 2),
+          x: dropPos ? Math.round(dropPos.x) : Math.round(project.width / 2),
+          y: dropPos ? Math.round(dropPos.y) : Math.round(project.height / 2),
           scaleX: 1,
           scaleY: 1,
           rotation: 0,
@@ -872,7 +956,11 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     });
   };
 
-  const handleDirectMediaUpload = async (files: FileList | null) => {
+  const handleDirectMediaUpload = async (
+    files: FileList | null,
+    addToStage = true,
+    dropPos?: { x: number; y: number }
+  ) => {
     if (!files || files.length === 0) return;
     const imported: MediaFile[] = [];
     for (const file of Array.from(files)) {
@@ -881,114 +969,182 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     }
     if (imported.length > 0) {
       await onImportMedia(imported);
-      const first = imported[0];
-      if (first.kind === 'video') addVideoLayer(first);
-      else addImageLayer(first);
+      if (addToStage) {
+        const first = imported[0];
+        if (first.kind === 'video') addVideoLayer(first, dropPos);
+        else addImageLayer(first, dropPos);
+      }
     }
   };
 
+  const clientToStageDropCoords = (clientX: number, clientY: number): { x: number; y: number } | undefined => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const rect = canvas.getBoundingClientRect();
+    if (
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    ) {
+      return {
+        x: ((clientX - rect.left) / Math.max(1, rect.width)) * project.width,
+        y: ((clientY - rect.top) / Math.max(1, rect.height)) * project.height,
+      };
+    }
+    return undefined;
+  };
+
+  const handleGenerateLocalSamples = async () => {
+    if (generatingSamples) return;
+    setGeneratingSamples(true);
+    try {
+      const created = await createLocalFolderSamples();
+      if (created.length > 0) {
+        await onImportMedia(created);
+      }
+    } finally {
+      setGeneratingSamples(false);
+    }
+  };
+
+  const startPointerFolderDrag = (asset: MediaFile, e: React.PointerEvent) => {
+    pointerFolderDragRef.current = {
+      active: true,
+      moved: false,
+      asset,
+      startX: e.clientX,
+      startY: e.clientY,
+    };
+  };
+
+  useEffect(() => {
+    const onWinMove = (e: PointerEvent) => {
+      const st = pointerFolderDragRef.current;
+      if (!st.active || !st.asset) return;
+      if (!st.moved && Math.hypot(e.clientX - st.startX, e.clientY - st.startY) > 7) {
+        st.moved = true;
+      }
+      if (st.moved) {
+        const overStage = Boolean(clientToStageDropCoords(e.clientX, e.clientY));
+        setIsDragOverStage(overStage);
+        setDragGhost({
+          asset: st.asset,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          overStage,
+        });
+      }
+    };
+
+    const onWinUp = (e: PointerEvent) => {
+      const st = pointerFolderDragRef.current;
+      if (!st.active || !st.asset) return;
+      const wasMoved = st.moved;
+      const droppedAsset = st.asset;
+      pointerFolderDragRef.current.active = false;
+      pointerFolderDragRef.current.asset = null;
+      setDragGhost(null);
+      setIsDragOverStage(false);
+
+      if (wasMoved) {
+        const dropPos = clientToStageDropCoords(e.clientX, e.clientY);
+        if (dropPos) {
+          if (droppedAsset.kind === 'video') addVideoLayer(droppedAsset, dropPos);
+          else addImageLayer(droppedAsset, dropPos);
+        }
+      }
+    };
+
+    window.addEventListener('pointermove', onWinMove);
+    window.addEventListener('pointerup', onWinUp);
+    window.addEventListener('pointercancel', onWinUp);
+    return () => {
+      window.removeEventListener('pointermove', onWinMove);
+      window.removeEventListener('pointerup', onWinUp);
+      window.removeEventListener('pointercancel', onWinUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.width, project.height, project.layers, safeFrameIndex]);
+
   const visualAssets = mediaFiles.filter((m) => m.kind === 'image' || m.kind === 'video');
+  const filteredFolderAssets = visualAssets.filter((m) => {
+    if (localFolderFilter === 'all') return true;
+    if (localFolderFilter === 'gif') return m.extension === 'gif' || m.mimeType === 'image/gif';
+    if (localFolderFilter === 'video') return m.kind === 'video';
+    return m.kind === 'image' && m.extension !== 'gif' && m.mimeType !== 'image/gif';
+  });
+  const aspectLabel = getAspectLabel(project.width, project.height);
+  const totalSec = (
+    project.frames.reduce((acc, f) => acc + (f.durationMs || 42), 0) / 1000
+  ).toFixed(2);
+  const currentSec = (
+    project.frames.slice(0, safeFrameIndex).reduce((acc, f) => acc + (f.durationMs || 42), 0) /
+    1000
+  ).toFixed(2);
 
   return (
-    <div className="max-w-[1600px] mx-auto px-3 sm:px-5 py-4 pb-24 lg:pb-6 space-y-4">
+    <div className="max-w-[1600px] mx-auto pl-10 pr-2.5 sm:pl-11 sm:pr-4 py-2.5 pb-20 lg:pb-6 space-y-2.5">
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept={ALL_ACCEPTED_EXTENSIONS}
         className="hidden"
         onChange={(e) => {
-          void handleDirectMediaUpload(e.target.files);
+          void handleDirectMediaUpload(e.target.files, !localFolderOpen);
           e.target.value = '';
         }}
       />
 
       {/* Studio Top Control Bar */}
-      <div className="rounded-xl bg-[#13161D] border border-white/8 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm font-bold text-white truncate max-w-[200px]">
+      <div className="rounded-xl bg-[#13161D] border border-white/8 px-3 py-1.5 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs sm:text-sm font-bold text-white truncate max-w-[170px]">
             {project.name}
           </span>
-          <span className="text-xs text-slate-400 font-mono tabular-nums">
-            Quadro {safeFrameIndex + 1}/{project.frames.length} · {project.fps} FPS
+          <span className="text-[11px] text-slate-400 font-mono tabular-nums">
+            Q{safeFrameIndex + 1}/{project.frames.length} · {project.fps}FPS
           </span>
           <span
-            className="rounded-lg bg-[#1A1E28] border border-amber-500/30 px-2.5 py-1 text-xs text-amber-300 font-mono"
-            title="Proporção Única do Projeto"
+            className="rounded bg-[#1A1E28] border border-amber-500/30 px-2 py-0.5 text-[10px] text-amber-300 font-mono"
+            title="Proporção e Resolução do Projeto"
           >
-            9:16 · {project.width}×{project.height}
+            {aspectLabel} · {project.width}×{project.height}
           </span>
         </div>
 
-        {/* Transport Controls: PLAY, PAUSE, STOP, VOLTAR, AVANÇAR, LOOP */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        {/* Compact Folder, Loop, Speed & Save Controls */}
+        <div className="flex flex-wrap items-center gap-1">
           <button
-            onClick={() => {
-              setIsPlaying(false);
-              setCurrentFrame((p) => (p > 0 ? p - 1 : project.frames.length - 1));
-            }}
-            className="min-h-[40px] px-2.5 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-slate-200 text-xs inline-flex items-center gap-1 cursor-pointer"
-            title="Voltar Quadro"
+            type="button"
+            onClick={() => setLocalFolderOpen((o) => !o)}
+            className={`h-7 px-2.5 rounded-md text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer border transition-colors ${
+              localFolderOpen
+                ? 'bg-amber-500 border-amber-400 text-slate-950'
+                : 'bg-[#1A1E28] border-amber-500/35 text-amber-300 hover:bg-amber-500/15'
+            }`}
+            title="Abrir Pasta Local com Imagens, GIF e MP4 dentro do programa"
           >
-            <SkipBack className="w-4 h-4" />
-            <span className="hidden sm:inline">Voltar</span>
-          </button>
-
-          {!isPlaying ? (
-            <button
-              onClick={() => setIsPlaying(true)}
-              className="min-h-[40px] px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-            >
-              <Play className="w-4 h-4 fill-current" />
-              PLAY
-            </button>
-          ) : (
-            <button
-              onClick={() => setIsPlaying(false)}
-              className="min-h-[40px] px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-            >
-              <Pause className="w-4 h-4 fill-current" />
-              PAUSE
-            </button>
-          )}
-
-          <button
-            onClick={() => {
-              setIsPlaying(false);
-              setCurrentFrame(0);
-            }}
-            className="min-h-[40px] px-3 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-slate-200 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-          >
-            <Square className="w-3.5 h-3.5 fill-current" />
-            STOP
-          </button>
-
-          <button
-            onClick={() => {
-              setIsPlaying(false);
-              setCurrentFrame((p) => (p + 1) % project.frames.length);
-            }}
-            className="min-h-[40px] px-2.5 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-slate-200 text-xs inline-flex items-center gap-1 cursor-pointer"
-            title="Avançar Quadro"
-          >
-            <span className="hidden sm:inline">Avançar</span>
-            <SkipForward className="w-4 h-4" />
+            <FolderOpen className="w-3.5 h-3.5" />
+            <span>Pasta Local ({visualAssets.length})</span>
           </button>
 
           <button
             onClick={() => setLoop((v) => !v)}
-            className={`min-h-[40px] px-2.5 rounded-lg text-xs font-medium inline-flex items-center gap-1 cursor-pointer ${
+            className={`h-7 px-2 rounded-md text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer ${
               loop ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-[#1A1E28] text-slate-400'
             }`}
             title="Repetir Animação"
           >
-            <Repeat className="w-3.5 h-3.5" />
+            <Repeat className="w-3 h-3" />
             Loop
           </button>
 
           <select
             value={speedMultiplier}
             onChange={(e) => setSpeedMultiplier(Number(e.target.value))}
-            className="min-h-[40px] rounded-lg bg-[#1A1E28] border border-white/10 px-2 text-xs text-white font-mono"
+            className="h-7 rounded-md bg-[#1A1E28] border border-white/10 px-1.5 text-[11px] text-white font-mono"
             title="Velocidade de Reprodução"
           >
             <option value={0.25}>0.25x</option>
@@ -997,27 +1153,206 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
             <option value={1.5}>1.5x</option>
             <option value={2}>2.0x</option>
           </select>
-        </div>
 
-        <div className="flex items-center gap-2">
           <button
             onClick={async () => {
               await onSaveProject();
               setSaveNotice('Salvo!');
               window.setTimeout(() => setSaveNotice(null), 2000);
             }}
-            className="min-h-[40px] px-3.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-300 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-[11px] font-semibold text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Save className="w-3.5 h-3.5" />
+            <Save className="w-3 h-3" />
             {saveNotice || 'Salvar'}
           </button>
         </div>
       </div>
 
+      {/* In-App Opened Local Folder Drawer (Images, GIF & MP4) — drag items straight onto stage */}
+      {localFolderOpen && (
+        <div
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+              e.preventDefault();
+              void handleDirectMediaUpload(e.dataTransfer.files, false);
+            }
+          }}
+          className="rounded-xl bg-[#13161D] border border-amber-500/45 p-2.5 space-y-2 shadow-xl"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" />
+              <div>
+                <h2 className="text-xs font-bold text-white leading-tight">
+                  Pasta Local · Imagens, GIF e MP4
+                </h2>
+                <p className="text-[10px] text-slate-400">
+                  Arraste qualquer item abaixo direto para o palco da animação para adicionar ao projeto
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1">
+              {[
+                { id: 'all' as const, label: 'Todos' },
+                { id: 'image' as const, label: 'Imagens' },
+                { id: 'gif' as const, label: 'GIF' },
+                { id: 'video' as const, label: 'MP4/Vídeo' },
+              ].map((flt) => (
+                <button
+                  key={flt.id}
+                  type="button"
+                  onClick={() => setLocalFolderFilter(flt.id)}
+                  className={`h-6 px-2 rounded text-[10px] font-semibold cursor-pointer ${
+                    localFolderFilter === flt.id
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'bg-[#1A1E28] text-slate-300 hover:bg-white/10'
+                  }`}
+                >
+                  {flt.label}
+                </button>
+              ))}
+
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="h-6 px-2 rounded bg-cyan-500 hover:bg-cyan-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+              >
+                <Upload className="w-3 h-3" />
+                Importar Img/GIF/MP4
+              </button>
+
+              <button
+                type="button"
+                disabled={generatingSamples}
+                onClick={() => void handleGenerateLocalSamples()}
+                className="h-6 px-2 rounded bg-white/10 hover:bg-white/15 border border-white/15 text-[10px] font-medium text-amber-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                title="Gerar arquivos locais de amostra (PNG, GIF animado e Vídeo)"
+              >
+                <Plus className="w-3 h-3" />
+                {generatingSamples ? 'Gerando...' : 'Amostras (PNG/GIF/MP4)'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setLocalFolderOpen(false)}
+                className="h-6 w-6 rounded bg-[#1A1E28] hover:bg-white/10 text-slate-300 inline-flex items-center justify-center cursor-pointer"
+                title="Fechar Pasta Local"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {filteredFolderAssets.length === 0 ? (
+            <div className="rounded-lg bg-[#0B0D11] border border-dashed border-white/15 py-4 px-3 text-center space-y-2">
+              <p className="text-xs text-slate-300">
+                Esta pasta local ainda não tem arquivos neste filtro.
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="h-7 px-3 rounded-md bg-amber-500 hover:bg-amber-400 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Selecionar Imagens / GIF / MP4
+                </button>
+                <button
+                  type="button"
+                  disabled={generatingSamples}
+                  onClick={() => void handleGenerateLocalSamples()}
+                  className="h-7 px-3 rounded-md bg-[#1A1E28] hover:bg-white/10 border border-white/15 text-[11px] font-semibold text-cyan-300 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Criar Amostras PNG, GIF e MP4
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-1.5 max-h-40 overflow-y-auto pr-0.5">
+              {filteredFolderAssets.map((asset) => {
+                const badge =
+                  asset.kind === 'video'
+                    ? 'MP4'
+                    : asset.extension === 'gif'
+                    ? 'GIF'
+                    : asset.extension.toUpperCase() || 'IMG';
+                return (
+                  <div
+                    key={asset.id}
+                    onPointerDown={(e) => startPointerFolderDrag(asset, e)}
+                    className="group rounded-lg bg-[#0B0D11] border border-white/10 hover:border-amber-500/60 p-1.5 space-y-1 cursor-grab active:cursor-grabbing select-none touch-none relative"
+                    title={`Arraste "${asset.name}" para o palco ou clique em +`}
+                  >
+                    <div className="relative h-14 rounded bg-[#1A1E28] overflow-hidden flex items-center justify-center">
+                      {asset.thumbnailDataUrl ? (
+                        <img
+                          src={asset.thumbnailDataUrl}
+                          alt={asset.name}
+                          draggable={false}
+                          className="w-full h-full object-cover pointer-events-none"
+                        />
+                      ) : (
+                        <Film className="w-6 h-6 text-amber-400" />
+                      )}
+                      <span
+                        className={`absolute top-1 left-1 rounded px-1 py-0.2 text-[9px] font-bold font-mono ${
+                          badge === 'MP4'
+                            ? 'bg-amber-500 text-slate-950'
+                            : badge === 'GIF'
+                            ? 'bg-cyan-500 text-slate-950'
+                            : 'bg-emerald-500 text-slate-950'
+                        }`}
+                      >
+                        {badge}
+                      </span>
+                      <button
+                        type="button"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void onDeleteMedia([asset.id]);
+                        }}
+                        className="absolute top-1 right-1 p-0.5 rounded bg-black/70 text-slate-300 hover:text-red-400 cursor-pointer"
+                        title="Apagar arquivo"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[10px] font-medium text-slate-200 truncate flex-1">
+                        {asset.name}
+                      </span>
+                      <button
+                        type="button"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (asset.kind === 'video') addVideoLayer(asset);
+                          else addImageLayer(asset);
+                        }}
+                        className="h-4 w-4 rounded bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 inline-flex items-center justify-center cursor-pointer shrink-0"
+                        title="Adicionar ao palco"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main 3-Column Studio Workspace */}
-      <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr_300px] gap-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr_275px] gap-2.5 items-start">
         {/* Left Panel: Assets & Layers */}
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3.5 space-y-4">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2.5">
           <div className="grid grid-cols-4 gap-1 bg-[#0B0D11] p-1 rounded-lg">
             {[
               { id: 'chars', label: 'Pers.', icon: User },
@@ -1030,13 +1365,13 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                 <button
                   key={t.id}
                   onClick={() => setActiveAddTab(t.id as typeof activeAddTab)}
-                  className={`py-2 rounded-md text-[11px] font-medium flex flex-col items-center gap-1 cursor-pointer ${
+                  className={`py-1 rounded text-[10px] font-medium flex flex-col items-center gap-0.5 cursor-pointer ${
                     activeAddTab === t.id
                       ? 'bg-amber-500 text-slate-950 font-semibold'
                       : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  <Icon className="w-3.5 h-3.5" />
+                  <Icon className="w-3 h-3" />
                   {t.label}
                 </button>
               );
@@ -1044,32 +1379,32 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
           </div>
 
           {activeAddTab === 'chars' && (
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-1.5">
               {CHARACTER_OPTIONS.map((ch) => (
                 <button
                   key={ch.id}
                   onClick={() => addCharacterLayer(ch.id, ch.label)}
-                  className="min-h-[42px] rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2.5 py-2 text-xs font-medium text-slate-200 text-left cursor-pointer"
+                  className="h-7 rounded-md bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2 text-[11px] font-medium text-slate-200 text-left truncate cursor-pointer"
                 >
                   + {ch.label}
                 </button>
               ))}
               <button
                 onClick={addQuickTextLayer}
-                className="col-span-2 min-h-[42px] rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2.5 py-2 text-xs font-medium text-amber-300 flex items-center gap-2 cursor-pointer"
+                className="col-span-2 h-7 rounded-md bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2 text-[11px] font-medium text-amber-300 flex items-center gap-1.5 cursor-pointer"
               >
-                <Type className="w-3.5 h-3.5" />+ Adicionar Texto Animado
+                <Type className="w-3 h-3" />+ Texto Animado
               </button>
             </div>
           )}
 
           {activeAddTab === 'shapes' && (
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-1.5">
               {SHAPE_OPTIONS.map((sh) => (
                 <button
                   key={sh.id}
                   onClick={() => addShapeLayer(sh.id, sh.label)}
-                  className="min-h-[42px] rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2.5 py-2 text-xs font-medium text-slate-200 text-left cursor-pointer"
+                  className="h-7 rounded-md bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2 text-[11px] font-medium text-slate-200 text-left truncate cursor-pointer"
                 >
                   + {sh.label}
                 </button>
@@ -1078,13 +1413,25 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
           )}
 
           {activeAddTab === 'images' && (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                onClick={() => setLocalFolderOpen((o) => !o)}
+                className={`w-full h-7 rounded-md text-[11px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer border ${
+                  localFolderOpen
+                    ? 'bg-amber-500 border-amber-400 text-slate-950'
+                    : 'bg-cyan-500/15 border-cyan-500/35 text-cyan-200 hover:bg-cyan-500/25'
+                }`}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                {localFolderOpen ? 'Fechar Pasta Local' : 'Abrir Pasta Local (Img/GIF/MP4)'}
+              </button>
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full min-h-[40px] rounded-lg bg-amber-500/15 border border-amber-500/30 text-xs font-semibold text-amber-300 flex items-center justify-center gap-1.5 cursor-pointer"
+                className="w-full h-7 rounded-md bg-amber-500/15 border border-amber-500/30 text-[11px] font-semibold text-amber-300 flex items-center justify-center gap-1 cursor-pointer"
               >
-                <Upload className="w-3.5 h-3.5" />
-                Importar GIF, MP4 ou Imagem
+                <Upload className="w-3 h-3" />
+                Importar GIF / MP4 / Img
               </button>
               <div className="max-h-44 overflow-y-auto space-y-1.5">
                 {visualAssets.length === 0 ? (
@@ -1093,29 +1440,47 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                   </p>
                 ) : (
                   visualAssets.map((asset) => (
-                    <button
+                    <div
                       key={asset.id}
-                      onClick={() =>
-                        asset.kind === 'video' ? addVideoLayer(asset) : addImageLayer(asset)
-                      }
-                      className="w-full flex items-center gap-2 rounded-lg bg-[#1A1E28] hover:bg-white/10 p-2 text-left cursor-pointer"
+                      onPointerDown={(e) => startPointerFolderDrag(asset, e)}
+                      className="w-full flex items-center gap-1 rounded-lg bg-[#1A1E28] hover:bg-white/10 p-1.5 select-none touch-none"
                     >
-                      {asset.thumbnailDataUrl ? (
-                        <img
-                          src={asset.thumbnailDataUrl}
-                          alt={asset.name}
-                          className="w-8 h-8 rounded object-cover shrink-0"
-                        />
-                      ) : (
-                        <Film className="w-6 h-6 text-amber-400 shrink-0" />
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <span className="text-xs text-slate-200 truncate block">{asset.name}</span>
-                        <span className="text-[10px] font-mono text-slate-400">
-                          {asset.extension.toUpperCase()}
-                        </span>
-                      </div>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          asset.kind === 'video' ? addVideoLayer(asset) : addImageLayer(asset)
+                        }
+                        className="flex-1 min-w-0 flex items-center gap-2 text-left cursor-pointer"
+                      >
+                        {asset.thumbnailDataUrl ? (
+                          <img
+                            src={asset.thumbnailDataUrl}
+                            alt={asset.name}
+                            className="w-8 h-8 rounded object-cover shrink-0"
+                          />
+                        ) : (
+                          <Film className="w-6 h-6 text-amber-400 shrink-0" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <span className="text-xs text-slate-200 truncate block">{asset.name}</span>
+                          <span className="text-[10px] font-mono text-slate-400">
+                            {asset.extension.toUpperCase()}
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void onDeleteMedia([asset.id]);
+                        }}
+                        className="p-1.5 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/15 cursor-pointer shrink-0"
+                        title="Apagar arquivo adicionado"
+                        aria-label={`Apagar ${asset.name}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -1142,16 +1507,18 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                 <option value="confetti">Confete</option>
               </select>
               <div className="pt-2 space-y-1.5">
-                <span className="block text-xs text-slate-300">Cenário de Fundo Fixo (9:16)</span>
-                <div className="flex items-center gap-2.5 rounded-lg bg-[#0B0D11] border border-white/10 p-2">
+                <span className="block text-[11px] text-slate-300">Cenário do Palco ({aspectLabel})</span>
+                <div className="flex items-center gap-2 rounded-lg bg-[#0B0D11] border border-white/10 p-2">
                   <img
                     src={STUDIO_BACKGROUND_IMAGE_URL}
                     alt="Cenário do Estúdio"
-                    className="w-9 h-14 rounded object-cover border border-white/15 shrink-0"
+                    className="w-8 h-12 rounded object-cover border border-white/15 shrink-0"
                   />
                   <div className="min-w-0">
                     <p className="text-[11px] font-semibold text-white truncate">Estúdio Arte Digital DNS</p>
-                    <p className="text-[10px] text-slate-400 font-mono">1080×1920 · 9:16 Único</p>
+                    <p className="text-[10px] text-slate-400 font-mono">
+                      {project.width}×{project.height} · {aspectLabel}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -1218,39 +1585,39 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
         </div>
 
         {/* Center Stage Canvas */}
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-3">
-          {/* Canvas Tool Strip */}
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2">
+          {/* Canvas Tool Strip + Stage Resolution Buttons */}
+          <div className="flex flex-wrap items-center justify-between gap-1.5">
+            <div className="flex flex-wrap items-center gap-1">
               <button
                 onClick={() => setToolMode('select')}
-                className={`min-h-[38px] px-3 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer ${
+                className={`h-7 px-2 rounded-md text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer ${
                   toolMode === 'select'
                     ? 'bg-amber-500 text-slate-950 font-semibold'
                     : 'bg-[#1A1E28] text-slate-300'
                 }`}
               >
-                <MousePointer className="w-3.5 h-3.5" />
-                Mover / Selecionar
+                <MousePointer className="w-3 h-3" />
+                Mover
               </button>
               <button
                 onClick={() => setToolMode('brush')}
-                className={`min-h-[38px] px-3 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer ${
+                className={`h-7 px-2 rounded-md text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer ${
                   toolMode === 'brush'
                     ? 'bg-amber-500 text-slate-950 font-semibold'
                     : 'bg-[#1A1E28] text-slate-300'
                 }`}
               >
-                <PenTool className="w-3.5 h-3.5" />
-                Desenhar Quadro
+                <PenTool className="w-3 h-3" />
+                Desenhar
               </button>
               {toolMode === 'brush' && (
-                <div className="flex items-center gap-2 ml-2">
+                <div className="flex items-center gap-1.5 ml-1">
                   <input
                     type="color"
                     value={brushColor}
                     onChange={(e) => setBrushColor(e.target.value)}
-                    className="w-8 h-8 rounded bg-transparent cursor-pointer"
+                    className="w-6 h-6 rounded bg-transparent cursor-pointer"
                   />
                   <input
                     type="range"
@@ -1258,65 +1625,263 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                     max={28}
                     value={brushSize}
                     onChange={(e) => setBrushSize(Number(e.target.value))}
-                    className="w-20 accent-amber-500"
+                    className="w-16 accent-amber-500"
                   />
                   <button
                     onClick={clearFrameStrokes}
-                    className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-red-500/20 text-[11px] text-slate-300 cursor-pointer"
+                    className="h-6 px-2 rounded bg-white/5 hover:bg-red-500/20 text-[10px] text-slate-300 cursor-pointer"
                   >
-                    Limpar Traço
+                    Limpar
                   </button>
                 </div>
               )}
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1">
+              {/* Controles de Zoom do Palco de Animação (Scroll Mouse + Touch Pinch/Duplo Toque) */}
+              <div
+                className="flex items-center gap-0.5 bg-[#0B0D11] border border-white/10 rounded-md p-0.5"
+                role="group"
+                aria-label="Zoom do Palco de Animação"
+              >
+                <button
+                  type="button"
+                  onClick={() => stageZoom.setZoomEnabled((v) => !v)}
+                  className={`h-6 px-1.5 rounded text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                    stageZoom.zoomEnabled
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-slate-400 hover:bg-white/10'
+                  }`}
+                  title="Ativar ou desativar zoom no scroll do mouse e toque na tela"
+                >
+                  <ZoomIn className="w-3 h-3" />
+                  <span>Zoom</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => stageZoom.zoomByStep(-1)}
+                  disabled={stageZoom.zoom <= 1}
+                  className="h-6 w-5 rounded text-slate-300 hover:bg-white/10 disabled:opacity-35 inline-flex items-center justify-center cursor-pointer"
+                  title="Reduzir zoom"
+                  aria-label="Reduzir zoom"
+                >
+                  <ZoomOut className="w-3 h-3" />
+                </button>
+                <span className="text-[10px] font-mono text-amber-300 min-w-[34px] text-center">
+                  {Math.round(stageZoom.zoom * 100)}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => stageZoom.zoomByStep(1)}
+                  disabled={stageZoom.zoom >= 5}
+                  className="h-6 w-5 rounded text-slate-300 hover:bg-white/10 disabled:opacity-35 inline-flex items-center justify-center cursor-pointer"
+                  title="Aumentar zoom"
+                  aria-label="Aumentar zoom"
+                >
+                  <ZoomIn className="w-3 h-3" />
+                </button>
+                {stageZoom.zoom > 1.01 && (
+                  <button
+                    type="button"
+                    onClick={stageZoom.resetZoom}
+                    className="h-6 px-1.5 rounded text-[10px] font-semibold text-slate-200 bg-white/10 hover:bg-white/20 inline-flex items-center gap-0.5 cursor-pointer"
+                    title="Voltar ao tamanho original (100%)"
+                  >
+                    <RotateCcw className="w-2.5 h-2.5" />
+                    <span>1:1</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1 bg-[#0B0D11] border border-white/10 rounded-md p-0.5" role="group" aria-label="Resoluções do Palco">
+                {STAGE_RESOLUTIONS.map((preset) => {
+                  const isSelectedRes =
+                    project.width === preset.width && project.height === preset.height;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        stageZoom.resetZoom();
+                        onUpdateProject(resizeProjectDimensions(project, preset.width, preset.height));
+                      }}
+                      className={`h-6 px-1.5 rounded text-[10px] font-mono font-semibold cursor-pointer ${
+                        isSelectedRes
+                          ? 'bg-amber-500 text-slate-950'
+                          : 'text-slate-300 hover:bg-white/10'
+                      }`}
+                      title={preset.description}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
               <button
                 onClick={() => setOnionSkin((v) => !v)}
-                className={`min-h-[36px] px-2.5 rounded-lg text-xs font-medium cursor-pointer ${
+                className={`h-7 px-2 rounded-md text-[10px] font-medium cursor-pointer ${
                   onionSkin ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-[#1A1E28] text-slate-400'
                 }`}
               >
-                Papel Cebola
+                Cebola
               </button>
               <button
                 onClick={() => setShowGrid((v) => !v)}
-                className={`min-h-[36px] px-2.5 rounded-lg text-xs font-medium inline-flex items-center gap-1 cursor-pointer ${
+                className={`h-7 px-2 rounded-md text-[10px] font-medium inline-flex items-center gap-1 cursor-pointer ${
                   showGrid ? 'bg-white/10 text-white' : 'bg-[#1A1E28] text-slate-400'
                 }`}
               >
-                <Grid className="w-3.5 h-3.5" />
+                <Grid className="w-3 h-3" />
                 Grade
               </button>
             </div>
           </div>
 
-          <div className="w-full rounded-lg bg-[#0B0D11] border border-white/10 overflow-hidden flex items-center justify-center p-2">
-            <canvas
-              ref={canvasRef}
-              width={project.width}
-              height={project.height}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              className={`max-h-[540px] w-auto max-w-full h-auto mx-auto block touch-none select-none ${
-                toolMode === 'eyedropper'
-                  ? 'cursor-cell'
-                  : toolMode === 'brush'
-                  ? 'cursor-crosshair'
-                  : 'cursor-grab active:cursor-grabbing'
-              }`}
-            />
+          <div
+            ref={stageViewportRef}
+            onDragOver={(e) => {
+              if (
+                e.dataTransfer.types.includes('application/x-studio-media-id') ||
+                e.dataTransfer.types.includes('Files')
+              ) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+                setIsDragOverStage(true);
+              }
+            }}
+            onDragLeave={() => setIsDragOverStage(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragOverStage(false);
+              const dropPos = clientToStageDropCoords(e.clientX, e.clientY);
+              const mediaId = e.dataTransfer.getData('application/x-studio-media-id');
+              if (mediaId) {
+                const asset = visualAssets.find((m) => m.id === mediaId);
+                if (asset) {
+                  if (asset.kind === 'video') addVideoLayer(asset, dropPos);
+                  else addImageLayer(asset, dropPos);
+                }
+                return;
+              }
+              if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                void handleDirectMediaUpload(e.dataTransfer.files, true, dropPos);
+              }
+            }}
+            className={`w-full rounded-lg bg-[#0B0D11] border overflow-hidden relative touch-none select-none transition-colors ${
+              isDragOverStage
+                ? 'border-2 border-dashed border-amber-400 bg-amber-500/5'
+                : 'border-white/10'
+            }`}
+          >
+            <div
+              style={{
+                transform: `translate(${stageZoom.pan.x}px, ${stageZoom.pan.y}px) scale(${stageZoom.zoom})`,
+                transformOrigin: '0 0',
+              }}
+              className="w-full p-1.5 flex items-center justify-center will-change-transform"
+            >
+              <canvas
+                ref={canvasRef}
+                width={project.width}
+                height={project.height}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerUp}
+                className={`max-h-[380px] sm:max-h-[420px] w-auto max-w-full h-auto mx-auto block touch-none select-none ${
+                  toolMode === 'eyedropper'
+                    ? 'cursor-cell'
+                    : toolMode === 'brush'
+                    ? 'cursor-crosshair'
+                    : 'cursor-grab active:cursor-grabbing'
+                }`}
+              />
+            </div>
+            {stageZoom.zoom > 1.01 && (
+              <button
+                type="button"
+                onClick={stageZoom.resetZoom}
+                className="absolute top-2 right-2 rounded bg-black/75 hover:bg-black border border-cyan-400/40 px-2 py-0.5 text-[10px] font-mono text-cyan-200 shadow cursor-pointer"
+                title="Clique para resetar zoom"
+              >
+                {Math.round(stageZoom.zoom * 100)}% · Resetar
+              </button>
+            )}
+            {isDragOverStage && (
+              <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-md bg-amber-500 text-slate-950 px-2.5 py-0.5 text-[10px] font-bold shadow">
+                Solte aqui para adicionar à animação
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 px-1">
+          <div className="flex flex-wrap items-center justify-center gap-1 pt-0.5">
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setCurrentFrame((p) => (p > 0 ? p - 1 : project.frames.length - 1));
+              }}
+              className="h-5 px-1.5 rounded bg-[#1A1E28] hover:bg-white/10 text-slate-200 text-[10px] inline-flex items-center gap-1 cursor-pointer"
+              title="Voltar Quadro"
+            >
+              <SkipBack className="w-2.5 h-2.5" />
+              <span className="hidden sm:inline">Voltar</span>
+            </button>
+
+            {!isPlaying ? (
+              <button
+                type="button"
+                onClick={() => setIsPlaying(true)}
+                className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <Play className="w-2.5 h-2.5 fill-current" />
+                PLAY
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setIsPlaying(false)}
+                className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <Pause className="w-2.5 h-2.5 fill-current" />
+                PAUSE
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setCurrentFrame(0);
+              }}
+              className="h-5 px-2 rounded bg-[#1A1E28] hover:bg-white/10 border border-white/10 text-slate-200 text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+            >
+              <Square className="w-2.5 h-2.5 fill-current" />
+              STOP
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setCurrentFrame((p) => (p + 1) % project.frames.length);
+              }}
+              className="h-5 px-1.5 rounded bg-[#1A1E28] hover:bg-white/10 text-slate-200 text-[10px] inline-flex items-center gap-1 cursor-pointer"
+              title="Avançar Quadro"
+            >
+              <span className="hidden sm:inline">Avançar</span>
+              <SkipForward className="w-2.5 h-2.5" />
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-1.5 text-[10px] text-slate-400 px-1">
             {toolMode === 'eyedropper' ? (
               <span className="text-emerald-400 font-medium">
                 Modo Conta-gotas ativo: clique na cor do fundo da imagem/vídeo no palco para removê-la.
               </span>
             ) : selectedLayer && selectedTransform ? (
               <span>
-                Arraste o centro para mover · Cantos âmbar para redimensionar · Pino ciano para girar
+                Arraste para mover · Scroll/Pinça dá zoom no ponteiro ou toque
               </span>
             ) : (
               <span>Clique em qualquer imagem ou objeto no palco para selecionar e redimensionar.</span>
@@ -1331,7 +1896,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
         </div>
 
         {/* Right Panel: Transform, Resize, Chroma Key, Keyframes & Custom Motion */}
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-4 max-h-[680px] overflow-y-auto">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2.5 max-h-[540px] overflow-y-auto">
           {selectedLayer && selectedTransform ? (
             <>
               <div className="flex items-center justify-between gap-2 pb-2 border-b border-white/8">
@@ -1417,9 +1982,9 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                         );
                       }}
                       className="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 text-[10px] font-medium cursor-pointer"
-                      title="Ajustar imagem ao tamanho 9:16 do palco"
+                      title="Ajustar imagem ao tamanho do palco"
                     >
-                      Ajustar 9:16
+                      Ajustar ao Palco
                     </button>
                   </div>
                 </div>
@@ -1775,50 +2340,61 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
         </div>
       </div>
 
-      {/* Bottom Multi-Track Animation Timeline */}
-      <div className="rounded-xl bg-[#13161D] border border-white/8 p-3.5 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-bold text-white inline-flex items-center gap-1.5 mr-1">
-              <Clock className="w-3.5 h-3.5 text-amber-400" />
-              Timeline
-            </span>
-            <span className="text-[11px] font-mono text-amber-300 bg-[#0B0D11] border border-white/10 px-2 py-1 rounded-md tabular-nums">
-              {(
-                project.frames
-                  .slice(0, safeFrameIndex)
-                  .reduce((acc, f) => acc + (f.durationMs || 42), 0) / 1000
-              ).toFixed(2)}
-              s /{' '}
-              {(
-                project.frames.reduce((acc, f) => acc + (f.durationMs || 42), 0) / 1000
-              ).toFixed(2)}
-              s
-            </span>
+      {/* Retractable Aerial Draggable Animation Timeline (36px frame/layer rows) */}
+      <AerialTimeline
+        title="Timeline · Animação"
+        subtitle={`${currentSec}s / ${totalSec}s · ${project.frames.length}Q`}
+        headerExtra={
+          <div className="flex items-center gap-1 flex-wrap">
             <button
+              type="button"
               onClick={addFrame}
-              className="min-h-[36px] px-3 rounded-lg bg-amber-500 text-xs font-semibold text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-6 px-2 rounded bg-amber-500 text-[10px] font-bold text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1 cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" />
-              Novo Quadro
+              <Plus className="w-3 h-3" />
+              Quadro
             </button>
             <button
+              type="button"
               onClick={duplicateFrame}
-              className="min-h-[36px] px-3 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-xs font-medium text-white inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-6 px-2 rounded bg-[#1A1E28] hover:bg-white/10 text-[10px] font-medium text-white inline-flex items-center gap-1 cursor-pointer"
             >
-              <Copy className="w-3.5 h-3.5 text-cyan-400" />
+              <Copy className="w-3 h-3 text-cyan-400" />
               Duplicar
             </button>
             <button
+              type="button"
               onClick={deleteFrame}
               disabled={project.frames.length <= 1}
-              className="min-h-[36px] px-3 rounded-lg bg-[#1A1E28] hover:bg-red-500/20 disabled:opacity-40 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-6 px-2 rounded bg-[#1A1E28] hover:bg-red-500/20 disabled:opacity-40 text-[10px] font-medium text-slate-200 inline-flex items-center gap-1 cursor-pointer"
             >
-              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+              <Trash2 className="w-3 h-3 text-red-400" />
               Excluir
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsPlaying((p) => !p)}
+              className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+              title={isPlaying ? 'Pausar animação' : 'Reproduzir animação'}
+            >
+              {isPlaying ? <Pause className="w-2.5 h-2.5 fill-current" /> : <Play className="w-2.5 h-2.5 fill-current" />}
+              {isPlaying ? 'PAUSE' : 'PLAY'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setCurrentFrame(0);
+              }}
+              className="h-5 px-2 rounded bg-[#1A1E28] hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+              title="Parar e voltar ao quadro 1"
+            >
+              <Square className="w-2.5 h-2.5 fill-current" />
+              STOP
             </button>
             {selectedLayer && (
               <button
+                type="button"
                 onClick={() => {
                   const hasKey = selectedLayer.keyframes.some(
                     (k) => k.frameIndex === safeFrameIndex
@@ -1832,20 +2408,17 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                     updateSelectedLayer((l) => upsertLayerKeyframe(l, safeFrameIndex, {}));
                   }
                 }}
-                className="min-h-[36px] px-3 rounded-lg bg-cyan-500/15 border border-cyan-500/30 hover:bg-cyan-500/25 text-xs font-semibold text-cyan-300 inline-flex items-center gap-1.5 cursor-pointer"
+                className="h-6 px-2 rounded bg-cyan-500/15 border border-cyan-500/30 hover:bg-cyan-500/25 text-[10px] font-semibold text-cyan-300 inline-flex items-center gap-1 cursor-pointer"
               >
-                <Diamond className="w-3 h-3 fill-current" />
+                <Diamond className="w-2.5 h-2.5 fill-current" />
                 {selectedLayer.keyframes.some((k) => k.frameIndex === safeFrameIndex) &&
                 selectedLayer.keyframes.length > 1
-                  ? `Remover Keyframe Q${safeFrameIndex + 1}`
-                  : `Marcar Keyframe Q${safeFrameIndex + 1}`}
+                  ? `-Key Q${safeFrameIndex + 1}`
+                  : `+Key Q${safeFrameIndex + 1}`}
               </button>
             )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="text-xs text-slate-400 flex items-center gap-2">
-              Duração (ms):
+            <label className="text-[10px] text-slate-400 inline-flex items-center gap-1 ml-1">
+              <Clock className="w-3 h-3 text-amber-400" />
               <input
                 type="number"
                 min={16}
@@ -1861,37 +2434,39 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                     ),
                   });
                 }}
-                className="w-18 rounded-lg bg-[#0B0D11] border border-white/12 px-2 py-1 text-xs text-white font-mono"
+                className="w-14 h-6 rounded bg-[#0B0D11] border border-white/12 px-1.5 text-[10px] text-white font-mono"
+                title="Duração do quadro em milissegundos"
               />
+              ms
             </label>
-            <div className="flex items-center gap-1 bg-[#0B0D11] border border-white/10 rounded-lg p-0.5">
+            <div className="flex items-center bg-[#0B0D11] border border-white/10 rounded p-0.5">
               <button
                 type="button"
                 onClick={() => setTimelineZoom((z) => Math.max(46, z - 12))}
-                className="p-1.5 text-slate-300 hover:text-white cursor-pointer"
-                title="Diminuir zoom da timeline"
+                className="p-0.5 text-slate-300 hover:text-white cursor-pointer"
+                title="Diminuir zoom"
               >
-                <ZoomOut className="w-3.5 h-3.5" />
+                <ZoomOut className="w-3 h-3" />
               </button>
               <button
                 type="button"
                 onClick={() => setTimelineZoom((z) => Math.min(116, z + 12))}
-                className="p-1.5 text-slate-300 hover:text-white cursor-pointer"
-                title="Aumentar zoom da timeline"
+                className="p-0.5 text-slate-300 hover:text-white cursor-pointer"
+                title="Aumentar zoom"
               >
-                <ZoomIn className="w-3.5 h-3.5" />
+                <ZoomIn className="w-3 h-3" />
               </button>
             </div>
           </div>
-        </div>
-
-        {/* Synchronized Multi-Track Timeline Grid */}
+        }
+      >
+        {/* Synchronized Multi-Track Timeline Grid (36px frame/layer rows) */}
         <div className="rounded-lg bg-[#0B0D11] border border-white/10 overflow-x-auto">
           <div className="min-w-max">
             {/* Playhead Time Ruler */}
             <div className="flex border-b border-white/10 bg-[#151923]">
-              <div className="w-44 shrink-0 sticky left-0 z-20 bg-[#151923] border-r border-white/10 px-3 py-2 text-[11px] font-semibold text-slate-300 flex items-center justify-between">
-                <span>Pistas / Camadas</span>
+              <div className="w-36 shrink-0 sticky left-0 z-20 bg-[#151923] border-r border-white/10 px-2.5 py-1 text-[10px] font-semibold text-slate-300 flex items-center justify-between">
+                <span>Pistas</span>
                 <span className="font-mono text-slate-500">{project.frames.length}Q</span>
               </div>
               <div className="flex">
@@ -1911,12 +2486,12 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                         setIsPlaying(false);
                         setCurrentFrame(idx);
                       }}
-                      className={`shrink-0 py-1.5 px-1 border-r border-white/6 text-center transition-colors cursor-pointer relative ${
+                      className={`shrink-0 py-1 px-1 border-r border-white/6 text-center transition-colors cursor-pointer relative ${
                         active ? 'bg-amber-500/20 text-amber-300' : 'text-slate-400 hover:bg-white/5'
                       }`}
                     >
-                      <div className="text-[10px] font-mono font-bold">Q{idx + 1}</div>
-                      <div className="text-[9px] font-mono text-slate-500">{tSec}s</div>
+                      <div className="text-[10px] font-mono font-bold leading-none">Q{idx + 1}</div>
+                      <div className="text-[9px] font-mono text-slate-500 leading-tight">{tSec}s</div>
                       {active && (
                         <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-400" />
                       )}
@@ -1926,9 +2501,9 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
               </div>
             </div>
 
-            {/* Frame-by-frame Drawing & Duration Track */}
+            {/* Frame-by-frame Drawing & Duration Track (36px h-9) */}
             <div className="flex border-b border-white/8 bg-[#10131A]">
-              <div className="w-44 shrink-0 sticky left-0 z-20 bg-[#10131A] border-r border-white/10 px-3 py-2 text-[11px] font-medium text-cyan-300 flex items-center gap-1.5">
+              <div className="w-36 shrink-0 sticky left-0 z-20 bg-[#10131A] border-r border-white/10 px-2.5 py-1 text-[10px] font-medium text-cyan-300 flex items-center gap-1">
                 <PenTool className="w-3 h-3 shrink-0" />
                 <span className="truncate">Quadros / Traços</span>
               </div>
@@ -1944,13 +2519,13 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                         setIsPlaying(false);
                         setCurrentFrame(idx);
                       }}
-                      className={`shrink-0 h-11 px-1.5 border-r border-white/6 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
+                      className={`shrink-0 h-9 px-1 border-r border-white/6 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
                         active
                           ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-500/60'
                           : 'hover:bg-white/5'
                       }`}
                     >
-                      <span className="text-[10px] font-mono text-slate-300">
+                      <span className="text-[10px] font-mono text-slate-300 leading-none">
                         {frame.durationMs}ms
                       </span>
                       {frame.strokes.length > 0 && (
@@ -1962,9 +2537,9 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
               </div>
             </div>
 
-            {/* Individual Layer Keyframe Tracks */}
+            {/* Individual Layer Keyframe Tracks (36px h-9) */}
             {project.layers.length === 0 ? (
-              <div className="px-4 py-4 text-xs text-slate-500">
+              <div className="px-3 py-2.5 text-[11px] text-slate-500">
                 Adicione personagens, imagens, GIFs ou MP4 para animar na timeline.
               </div>
             ) : (
@@ -1983,11 +2558,11 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                   >
                     <div
                       onClick={() => setSelectedLayerId(layer.id)}
-                      className={`w-44 shrink-0 sticky left-0 z-20 border-r border-white/10 px-2.5 py-2 flex items-center justify-between gap-1.5 cursor-pointer ${
+                      className={`w-36 shrink-0 sticky left-0 z-20 border-r border-white/10 px-2 py-1 flex items-center justify-between gap-1 cursor-pointer ${
                         isSel ? 'bg-[#1D1B16] text-amber-300' : 'bg-[#0F1218] text-slate-300'
                       }`}
                     >
-                      <span className="text-[11px] font-medium truncate flex-1">{layer.name}</span>
+                      <span className="text-[10px] font-medium truncate flex-1">{layer.name}</span>
                       <button
                         type="button"
                         onClick={(e) => {
@@ -2062,21 +2637,21 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                                 ),
                               });
                             }}
-                            className={`shrink-0 h-10 border-r border-white/6 flex items-center justify-center relative cursor-pointer ${
+                            className={`shrink-0 h-9 border-r border-white/6 flex items-center justify-center relative cursor-pointer ${
                               activeFrameCell ? 'bg-amber-500/12' : 'hover:bg-white/5'
                             }`}
                             title={`Q${idx + 1} · Duplo clique para alternar keyframe`}
                           >
                             {inSpan && (
                               <span
-                                className={`absolute left-0 right-0 h-1.5 top-1/2 -translate-y-1/2 ${
+                                className={`absolute left-0 right-0 h-1 top-1/2 -translate-y-1/2 ${
                                   isSel ? 'bg-amber-500/35' : 'bg-cyan-500/20'
                                 }`}
                               />
                             )}
                             {hasKey ? (
                               <Diamond
-                                className={`relative z-10 w-3.5 h-3.5 fill-current ${
+                                className={`relative z-10 w-3 h-3 fill-current ${
                                   activeFrameCell && isSel
                                     ? 'text-amber-400'
                                     : 'text-cyan-400'
@@ -2095,7 +2670,37 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
             )}
           </div>
         </div>
-      </div>
+      </AerialTimeline>
+
+      {dragGhost && (
+        <div
+          style={{
+            left: dragGhost.clientX,
+            top: dragGhost.clientY,
+          }}
+          className={`fixed z-50 -translate-x-1/2 -translate-y-1/2 pointer-events-none rounded-lg border px-2 py-1.5 shadow-2xl flex items-center gap-2 backdrop-blur-md ${
+            dragGhost.overStage
+              ? 'bg-amber-500/95 border-amber-300 text-slate-950'
+              : 'bg-[#13161D]/95 border-white/20 text-white'
+          }`}
+        >
+          {dragGhost.asset.thumbnailDataUrl ? (
+            <img
+              src={dragGhost.asset.thumbnailDataUrl}
+              alt={dragGhost.asset.name}
+              className="w-8 h-8 rounded object-cover"
+            />
+          ) : (
+            <Film className="w-5 h-5" />
+          )}
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold max-w-[120px] truncate">{dragGhost.asset.name}</p>
+            <p className="text-[9px] font-semibold">
+              {dragGhost.overStage ? 'Solte para adicionar' : 'Arraste para o palco'}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

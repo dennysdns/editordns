@@ -11,6 +11,7 @@ export type StudioView =
   | 'gallery'
   | 'projects'
   | 'export'
+  | 'converter'
   | 'settings';
 
 export type VirtualFolderId =

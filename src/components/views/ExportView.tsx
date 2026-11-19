@@ -8,8 +8,8 @@ import {
 import { mixAudioClipsOffline } from '../../utils/audioEngine';
 import { exportProjectVideoOffline, triggerBlobDownload } from '../../utils/videoExporter';
 import { formatBytes } from '../../utils/mediaImporter';
-
 import { DecodedGif } from '../../utils/gifDecoder';
+import { getAspectLabel } from '../../utils/resolutionPresets';
 
 interface ExportViewProps {
   project: StudioProject;
@@ -42,7 +42,8 @@ export const ExportView: React.FC<ExportViewProps> = ({
     kind: 'video' | 'image' | 'audio';
   } | null>(null);
 
-  const getExportDims = () => ({ width: 1080, height: 1920 });
+  const getExportDims = () => ({ width: project.width, height: project.height });
+  const aspectLabel = getAspectLabel(project.width, project.height);
 
   const handleExportVideo = async () => {
     setRendering(true);
@@ -98,8 +99,8 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const handleExportPngFrame = async () => {
     await ensureStudioBackgroundLoaded();
     const off = document.createElement('canvas');
-    off.width = 1080;
-    off.height = 1920;
+    off.width = project.width;
+    off.height = project.height;
     const ctx = off.getContext('2d');
     if (!ctx) return;
 
@@ -155,22 +156,22 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-10 space-y-6">
-      <div className="rounded-2xl bg-[#13161D] border border-white/8 p-6 space-y-5">
+    <div className="max-w-4xl mx-auto px-3 sm:px-5 py-4 pb-20 lg:pb-8 space-y-4">
+      <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-4">
         <div>
-          <h1 className="text-xl font-bold text-white">Exportar Vídeo, Imagem e Áudio</h1>
-          <p className="text-xs text-slate-400 mt-1">
+          <h1 className="text-base font-bold text-white">Exportar Vídeo, Imagem e Áudio</h1>
+          <p className="text-[11px] text-slate-400 mt-0.5">
             Renderização 100% local via Canvas 2D + MediaRecorder + Web Audio Offline
           </p>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs text-slate-300 mb-1.5">Origem da Cena</label>
+            <label className="block text-[11px] text-slate-300 mb-1">Origem da Cena</label>
             <select
               value={source}
               onChange={(e) => setSource(e.target.value as 'animation' | 'video')}
-              className="w-full rounded-xl bg-[#0B0D11] border border-white/12 px-3 py-2.5 text-sm text-white"
+              className="w-full rounded-lg bg-[#0B0D11] border border-white/12 px-2.5 py-1.5 text-xs text-white"
             >
               <option value="animation">Estúdio de Animação ({project.frames.length} quadros)</option>
               <option value="video">Linha do Tempo do Editor de Vídeo ({project.videoClips.length} clipes)</option>
@@ -178,18 +179,18 @@ export const ExportView: React.FC<ExportViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-xs text-slate-300 mb-1.5">Resolução de Saída</label>
-            <div className="w-full rounded-xl bg-[#0B0D11] border border-amber-500/30 px-3 py-2.5 text-sm text-amber-300 font-mono">
-              9:16 Vertical Único (1080×1920)
+            <label className="block text-[11px] text-slate-300 mb-1">Resolução de Saída</label>
+            <div className="w-full rounded-lg bg-[#0B0D11] border border-amber-500/30 px-2.5 py-1.5 text-xs text-amber-300 font-mono">
+              {aspectLabel} ({project.width}×{project.height})
             </div>
           </div>
 
           <div>
-            <label className="block text-xs text-slate-300 mb-1.5">Taxa de Quadros (FPS)</label>
+            <label className="block text-[11px] text-slate-300 mb-1">Taxa de Quadros (FPS)</label>
             <select
               value={fps}
               onChange={(e) => setFps(Number(e.target.value))}
-              className="w-full rounded-xl bg-[#0B0D11] border border-white/12 px-3 py-2.5 text-sm text-white font-mono"
+              className="w-full rounded-lg bg-[#0B0D11] border border-white/12 px-2.5 py-1.5 text-xs text-white font-mono"
             >
               <option value={12}>12 FPS</option>
               <option value={24}>24 FPS</option>
@@ -199,11 +200,11 @@ export const ExportView: React.FC<ExportViewProps> = ({
           </div>
 
           <div>
-            <label className="block text-xs text-slate-300 mb-1.5">Formato Preferencial</label>
+            <label className="block text-[11px] text-slate-300 mb-1">Formato Preferencial</label>
             <select
               value={format}
               onChange={(e) => setFormat(e.target.value as 'mp4' | 'webm')}
-              className="w-full rounded-xl bg-[#0B0D11] border border-white/12 px-3 py-2.5 text-sm text-white"
+              className="w-full rounded-lg bg-[#0B0D11] border border-white/12 px-2.5 py-1.5 text-xs text-white"
             >
               <option value="mp4">MP4 (quando suportado pelo dispositivo) / WebM</option>
               <option value="webm">WebM (VP9/VP8 Alta Compatibilidade)</option>
@@ -212,7 +213,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
         </div>
 
         <div>
-          <div className="flex justify-between text-xs text-slate-300 mb-1">
+          <div className="flex justify-between text-[11px] text-slate-300 mb-1">
             <span>Qualidade de Vídeo (Bitrate)</span>
             <span className="font-mono text-white">{bitrateMbps} Mbps</span>
           </div>
@@ -236,14 +237,14 @@ export const ExportView: React.FC<ExportViewProps> = ({
           const totalSources = activeAudioCount + videoAudioCount;
           return (
             <div
-              className={`rounded-xl border px-4 py-3 text-xs flex flex-wrap items-center justify-between gap-2 ${
+              className={`rounded-lg border px-3 py-2 text-[11px] flex flex-wrap items-center justify-between gap-2 ${
                 totalSources > 0
                   ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
                   : 'bg-[#0B0D11] border-white/10 text-slate-400'
               }`}
             >
               <div className="flex items-center gap-2">
-                <Music className="w-4 h-4 shrink-0 text-emerald-400" />
+                <Music className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
                 <span>
                   {totalSources > 0
                     ? `Exportação com Áudio Ativada: ${activeAudioCount} faixa(s) de áudio/música${
@@ -252,18 +253,18 @@ export const ExportView: React.FC<ExportViewProps> = ({
                     : 'Nenhuma faixa de áudio ativa no momento (adicione músicas no Editor de Vídeo ou Áudio).'}
                 </span>
               </div>
-              <span className="font-mono text-[11px] opacity-85">Mixagem Web Audio</span>
+              <span className="font-mono text-[10px] opacity-85">Mixagem Web Audio</span>
             </div>
           );
         })()}
 
         {rendering && (
-          <div className="space-y-2 rounded-xl bg-[#0B0D11] border border-white/10 p-4">
-            <div className="flex justify-between text-xs text-slate-200">
+          <div className="space-y-1.5 rounded-lg bg-[#0B0D11] border border-white/10 p-3">
+            <div className="flex justify-between text-[11px] text-slate-200">
               <span>{statusText}</span>
               <span className="font-mono text-amber-400">{progress}%</span>
             </div>
-            <div className="w-full h-2.5 rounded-full bg-white/10 overflow-hidden">
+            <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
               <div
                 style={{ width: `${progress}%` }}
                 className="h-full bg-amber-500 transition-all duration-150"
@@ -273,35 +274,35 @@ export const ExportView: React.FC<ExportViewProps> = ({
         )}
 
         {!rendering && statusText && (
-          <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 text-xs text-emerald-300 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-[11px] text-emerald-300 flex items-center gap-2">
+            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
             <span>{statusText}</span>
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
           <button
             onClick={handleExportVideo}
             disabled={rendering}
-            className="min-h-[48px] rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-xs font-bold text-slate-950 inline-flex items-center justify-center gap-2 cursor-pointer"
+            className="h-8 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-[11px] font-bold text-slate-950 inline-flex items-center justify-center gap-1.5 cursor-pointer"
           >
-            <Film className="w-4 h-4" />
+            <Film className="w-3.5 h-3.5" />
             Exportar Vídeo
           </button>
           <button
             onClick={handleExportPngFrame}
             disabled={rendering}
-            className="min-h-[48px] rounded-xl bg-[#1A1E28] hover:bg-white/10 border border-white/12 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 cursor-pointer"
+            className="h-8 rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/12 text-[11px] font-semibold text-white inline-flex items-center justify-center gap-1.5 cursor-pointer"
           >
-            <ImageIcon className="w-4 h-4 text-cyan-400" />
+            <ImageIcon className="w-3.5 h-3.5 text-cyan-400" />
             Exportar Quadro PNG
           </button>
           <button
             onClick={handleExportWav}
             disabled={rendering}
-            className="min-h-[48px] rounded-xl bg-[#1A1E28] hover:bg-white/10 border border-white/12 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 cursor-pointer"
+            className="h-8 rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/12 text-[11px] font-semibold text-white inline-flex items-center justify-center gap-1.5 cursor-pointer"
           >
-            <Music className="w-4 h-4 text-emerald-400" />
+            <Music className="w-3.5 h-3.5 text-emerald-400" />
             Exportar Áudio WAV
           </button>
         </div>

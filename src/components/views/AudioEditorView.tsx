@@ -11,22 +11,27 @@ import {
   Sliders,
   Disc,
   Upload,
+  Scissors,
+  X,
 } from 'lucide-react';
 import { AudioClip, GalleryItem, MediaFile, StudioProject } from '../../types/studio';
 import {
   decodeAudioBlob,
   generateLocalSynthLoopWav,
   getAudioContext,
+  getMasterDestination,
   mixAudioClipsOffline,
 } from '../../utils/audioEngine';
 import { ALL_ACCEPTED_EXTENSIONS, formatDuration, processImportedFile } from '../../utils/mediaImporter';
 import { triggerBlobDownload } from '../../utils/videoExporter';
+import { AerialTimeline } from '../AerialTimeline';
 
 interface AudioEditorViewProps {
   project: StudioProject;
   mediaFiles: MediaFile[];
   onUpdateProject: (updated: StudioProject) => void;
   onImportMedia: (files: MediaFile[]) => Promise<void>;
+  onDeleteMedia: (ids: string[]) => Promise<void>;
   onSaveToGallery: (item: GalleryItem) => Promise<void>;
 }
 
@@ -35,6 +40,7 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
   mediaFiles,
   onUpdateProject,
   onImportMedia,
+  onDeleteMedia,
   onSaveToGallery,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -46,21 +52,26 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
   );
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [renderingWav, setRenderingWav] = useState(false);
+  const [cutAnchor, setCutAnchor] = useState<{ clipId: string; sourceTime: number } | null>(null);
 
   const trimDragRef = useRef<{
     active: boolean;
+    moved: boolean;
     clipId: string;
     mode: 'left' | 'right' | 'window';
     startClientX: number;
+    clickSourceTime: number;
     origTrimStart: number;
     origDuration: number;
     sourceDuration: number;
     laneWidthPx: number;
   }>({
     active: false,
+    moved: false,
     clipId: '',
     mode: 'left',
     startClientX: 0,
+    clickSourceTime: 0,
     origTrimStart: 0,
     origDuration: 1,
     sourceDuration: 1,
@@ -71,6 +82,8 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
     const drag = trimDragRef.current;
     if (!drag.active) return;
     const dx = e.clientX - drag.startClientX;
+    if (!drag.moved && Math.abs(dx) <= 5) return;
+    drag.moved = true;
     const dt = (dx / Math.max(120, drag.laneWidthPx)) * drag.sourceDuration;
 
     if (drag.mode === 'left') {
@@ -111,7 +124,73 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
   };
 
   const handleTrimPointerUp = () => {
+    const drag = trimDragRef.current;
+    if (drag.active && !drag.moved && drag.mode === 'window') {
+      setCutAnchor({ clipId: drag.clipId, sourceTime: drag.clickSourceTime });
+    }
     trimDragRef.current.active = false;
+  };
+
+  const cutAudioStartAt = (clipId: string, t: number) => {
+    const clip = project.audioClips.find((c) => c.id === clipId);
+    if (!clip) return;
+    const end = clip.trimStart + clip.duration;
+    if (t <= clip.trimStart + 0.05 || t >= end - 0.05) return;
+    onUpdateProject({
+      ...project,
+      audioClips: project.audioClips.map((c) =>
+        c.id === clipId
+          ? {
+              ...c,
+              trimStart: Number(t.toFixed(2)),
+              duration: Number(Math.max(0.2, end - t).toFixed(2)),
+            }
+          : c
+      ),
+    });
+    setCutAnchor(null);
+  };
+
+  const cutAudioEndAt = (clipId: string, t: number) => {
+    const clip = project.audioClips.find((c) => c.id === clipId);
+    if (!clip) return;
+    const end = clip.trimStart + clip.duration;
+    if (t <= clip.trimStart + 0.05 || t >= end - 0.05) return;
+    onUpdateProject({
+      ...project,
+      audioClips: project.audioClips.map((c) =>
+        c.id === clipId
+          ? { ...c, duration: Number(Math.max(0.2, t - c.trimStart).toFixed(2)) }
+          : c
+      ),
+    });
+    setCutAnchor(null);
+  };
+
+  const splitAudioAt = (clipId: string, t: number) => {
+    const clip = project.audioClips.find((c) => c.id === clipId);
+    if (!clip) return;
+    const end = clip.trimStart + clip.duration;
+    if (t <= clip.trimStart + 0.05 || t >= end - 0.05) return;
+    const firstDur = Number((t - clip.trimStart).toFixed(2));
+    const secondDur = Number(Math.max(0.2, end - t).toFixed(2));
+    const firstHalf: AudioClip = { ...clip, duration: firstDur };
+    const secondHalf: AudioClip = {
+      ...clip,
+      id: `aclip-${Date.now()}`,
+      name: `${clip.name} (Parte 2)`,
+      startTime: Number((clip.startTime + firstDur / Math.max(0.25, clip.speed)).toFixed(2)),
+      trimStart: Number(t.toFixed(2)),
+      duration: secondDur,
+    };
+    onUpdateProject({
+      ...project,
+      audioClips: project.audioClips.flatMap((c) =>
+        c.id === clipId ? [firstHalf, secondHalf] : [c]
+      ),
+    });
+    setSelectedClipId(secondHalf.id);
+    setCutAnchor(null);
   };
 
   const audioMedia = mediaFiles.filter((m) => m.kind === 'audio');
@@ -194,7 +273,7 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
       bass.connect(mid);
       mid.connect(treble);
       treble.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(getMasterDestination());
 
       src.start(startAt, clip.trimStart, clip.duration);
       activeNodesRef.current.push(src);
@@ -312,7 +391,7 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 pb-24 lg:pb-8 space-y-5">
+    <div className="max-w-7xl mx-auto pl-10 pr-2.5 sm:pl-11 sm:pr-4 py-2.5 pb-20 lg:pb-6 space-y-2.5">
       <input
         ref={fileInputRef}
         type="file"
@@ -325,317 +404,134 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
       />
 
       {/* Header Controls */}
-      <div className="rounded-2xl bg-[#13161D] border border-white/8 p-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="rounded-xl bg-[#13161D] border border-white/8 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="text-lg font-bold text-white">Editor de Áudio e Música Offline</h1>
-          <p className="text-xs text-slate-400">
-            Forma de onda Web Audio API · Corte, Fade, Equalizador 3 Bandas e Exportação WAV
+          <h1 className="text-xs sm:text-sm font-bold text-white leading-tight">Editor de Áudio e Música Offline</h1>
+          <p className="text-[10px] text-slate-400">
+            Forma de onda Web Audio API · Corte, Fade, Equalizador 3 Bandas e WAV
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           {!isPlaying ? (
             <button
               onClick={startPlayback}
-              className="min-h-[40px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
             >
-              <Play className="w-4 h-4 fill-current" />
+              <Play className="w-2.5 h-2.5 fill-current" />
               PLAY MIX
             </button>
           ) : (
             <button
               onClick={stopPlayback}
-              className="min-h-[40px] px-4 rounded-xl bg-red-500 hover:bg-red-400 text-xs font-bold text-white inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-5 px-2 rounded bg-red-500 hover:bg-red-400 text-[10px] font-bold text-white inline-flex items-center gap-1 cursor-pointer"
             >
-              <Square className="w-3.5 h-3.5 fill-current" />
+              <Square className="w-2.5 h-2.5 fill-current" />
               STOP
             </button>
           )}
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="min-h-[40px] px-3.5 rounded-xl bg-[#1A1E28] border border-white/12 text-xs font-semibold text-white hover:bg-white/10 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-md bg-[#1A1E28] border border-white/12 text-[11px] font-semibold text-white hover:bg-white/10 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Upload className="w-4 h-4 text-amber-400" />
+            <Upload className="w-3 h-3 text-amber-400" />
             Importar Áudio
           </button>
           <button
             onClick={handleExportWav}
             disabled={renderingWav || project.audioClips.length === 0}
-            className="min-h-[40px] px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-md bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-3 h-3" />
             {renderingWav ? 'Mixando...' : 'Exportar WAV'}
           </button>
         </div>
       </div>
 
       {statusMsg && (
-        <div className="rounded-xl bg-[#13161D] border border-cyan-500/30 px-4 py-2.5 text-xs text-cyan-200">
+        <div className="rounded-lg bg-[#13161D] border border-cyan-500/30 px-3 py-1.5 text-[11px] text-cyan-200">
           {statusMsg}
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_300px] gap-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-2.5 items-start">
         {/* Left: Audio Library & Local Synth Generator */}
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-4">
-          <div className="space-y-2">
-            <h2 className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-              <Disc className="w-4 h-4 text-cyan-400" />
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2.5">
+          <div className="space-y-1.5">
+            <h2 className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+              <Disc className="w-3.5 h-3.5 text-cyan-400" />
               Sintetizador Local de Loops
             </h2>
-            <div className="grid grid-cols-1 gap-1.5">
+            <div className="grid grid-cols-1 gap-1">
               <button
                 onClick={() => handleGenerateSynth('batida-eletronica', 'Batida Eletrônica')}
-                className="min-h-[38px] rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-3 text-xs text-left text-slate-200 cursor-pointer"
+                className="h-7 rounded-md bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2.5 text-[11px] text-left text-slate-200 cursor-pointer"
               >
-                + Gerar Batida Eletrônica (WAV)
+                + Batida Eletrônica (WAV)
               </button>
               <button
                 onClick={() => handleGenerateSynth('trilha-ambiente', 'Trilha Ambiente')}
-                className="min-h-[38px] rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-3 text-xs text-left text-slate-200 cursor-pointer"
+                className="h-7 rounded-md bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2.5 text-[11px] text-left text-slate-200 cursor-pointer"
               >
-                + Gerar Trilha Ambiente (WAV)
+                + Trilha Ambiente (WAV)
               </button>
               <button
                 onClick={() => handleGenerateSynth('efeito-arcade', 'Efeito Arcade')}
-                className="min-h-[38px] rounded-lg bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-3 text-xs text-left text-slate-200 cursor-pointer"
+                className="h-7 rounded-md bg-[#1A1E28] hover:bg-white/10 border border-white/8 px-2.5 text-[11px] text-left text-slate-200 cursor-pointer"
               >
-                + Gerar Efeito Arcade (WAV)
+                + Efeito Arcade (WAV)
               </button>
             </div>
           </div>
 
-          <div className="pt-3 border-t border-white/8 space-y-2">
-            <h3 className="text-xs font-semibold text-slate-300">Músicas Importadas</h3>
-            <div className="max-h-60 overflow-y-auto space-y-1.5">
+          <div className="pt-2 border-t border-white/8 space-y-1.5">
+            <h3 className="text-[11px] font-semibold text-slate-300">Músicas Importadas</h3>
+            <div className="max-h-52 overflow-y-auto space-y-1">
               {audioMedia.length === 0 ? (
                 <p className="text-xs text-slate-500 py-3">
                   Importe MP3, WAV, AAC, OGG ou M4A.
                 </p>
               ) : (
                 audioMedia.map((m) => (
-                  <button
+                  <div
                     key={m.id}
-                    onClick={() => addMediaClip(m)}
-                    className="w-full flex items-center justify-between gap-2 rounded-lg bg-[#1A1E28] hover:bg-white/10 p-2.5 text-left cursor-pointer"
+                    className="w-full flex items-center justify-between gap-1 rounded-lg bg-[#1A1E28] hover:bg-white/10 p-1.5"
                   >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Music className="w-4 h-4 text-cyan-400 shrink-0" />
-                      <div className="min-w-0">
-                        <p className="text-xs font-medium text-white truncate">{m.name}</p>
+                    <button
+                      type="button"
+                      onClick={() => addMediaClip(m)}
+                      className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                    >
+                      <Music className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] font-medium text-white truncate">{m.name}</p>
                         <p className="text-[10px] font-mono text-slate-400">
                           {formatDuration(m.duration)}
                         </p>
                       </div>
-                    </div>
-                    <Plus className="w-4 h-4 text-amber-400 shrink-0" />
-                  </button>
+                      <Plus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void onDeleteMedia([m.id]);
+                      }}
+                      className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-500/15 cursor-pointer shrink-0"
+                      title="Apagar áudio adicionado"
+                      aria-label={`Apagar ${m.name}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 ))
               )}
             </div>
           </div>
         </div>
 
-        {/* Center: Multi-Track Waveform Lanes */}
-        <div
-          onPointerMove={handleTrimPointerMove}
-          onPointerUp={handleTrimPointerUp}
-          onPointerCancel={handleTrimPointerUp}
-          className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3 min-h-[360px]"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-xs font-semibold text-slate-300">
-              Faixas de Áudio ({project.audioClips.length})
-            </h2>
-            <span className="text-[11px] text-amber-300/90">
-              Arraste as alças laterais na onda para cortar o áudio
-            </span>
-          </div>
-          {project.audioClips.length === 0 ? (
-            <div className="py-16 text-center space-y-2">
-              <Music className="w-10 h-10 text-slate-600 mx-auto" />
-              <p className="text-sm text-slate-300">Nenhuma faixa na linha do tempo.</p>
-              <p className="text-xs text-slate-400">
-                Importe uma música ou gere um loop sintetizado ao lado.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {project.audioClips.map((clip) => {
-                const active = clip.id === selectedClipId;
-                const srcTotal = Math.max(0.2, clip.sourceDuration || clip.duration);
-                const startPct = Math.max(0, Math.min(98, (clip.trimStart / srcTotal) * 100));
-                const endPct = Math.max(
-                  startPct + 2,
-                  Math.min(100, ((clip.trimStart + clip.duration) / srcTotal) * 100)
-                );
-                const trimEnd = Math.min(srcTotal, clip.trimStart + clip.duration);
-
-                return (
-                  <div
-                    key={clip.id}
-                    onClick={() => setSelectedClipId(clip.id)}
-                    className={`rounded-xl border p-3 space-y-2 transition-colors cursor-pointer ${
-                      active
-                        ? 'border-amber-500 bg-amber-500/10'
-                        : 'border-white/10 bg-[#1A1E28] hover:border-white/20'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <span className="text-xs font-semibold text-white truncate block">{clip.name}</span>
-                        <span className="text-[10px] font-mono text-slate-400">
-                          Corte: {clip.trimStart.toFixed(2)}s → {trimEnd.toFixed(2)}s (Dur: {clip.duration.toFixed(2)}s / Orig: {srcTotal.toFixed(1)}s)
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onUpdateProject({
-                              ...project,
-                              audioClips: project.audioClips.map((c) =>
-                                c.id === clip.id ? { ...c, muted: !c.muted } : c
-                              ),
-                            });
-                          }}
-                          className={`p-1.5 rounded-lg cursor-pointer ${
-                            clip.muted ? 'bg-red-500/20 text-red-400' : 'text-slate-300 hover:bg-white/10'
-                          }`}
-                          title="Silenciar"
-                        >
-                          {clip.muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onUpdateProject({
-                              ...project,
-                              audioClips: project.audioClips.filter((c) => c.id !== clip.id),
-                            });
-                            if (selectedClipId === clip.id) setSelectedClipId(null);
-                          }}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-white/10 cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Interactive Drag-to-Trim Waveform Bars */}
-                    <div className="h-16 rounded-lg bg-[#0B0D11] relative overflow-hidden select-none touch-none border border-white/8">
-                      <div className="absolute inset-0 px-2 flex items-center gap-[2px] pointer-events-none">
-                        {clip.peaks.map((pk, idx) => (
-                          <div
-                            key={idx}
-                            style={{ height: `${Math.max(12, Math.round(pk * 100))}%` }}
-                            className={`flex-1 rounded-full ${
-                              clip.muted
-                                ? 'bg-slate-700'
-                                : active
-                                ? 'bg-amber-400'
-                                : 'bg-cyan-500/75'
-                            }`}
-                          />
-                        ))}
-                      </div>
-
-                      {/* Dimmed trimmed-out left region */}
-                      {startPct > 0 && (
-                        <div
-                          style={{ width: `${startPct}%` }}
-                          className="absolute left-0 top-0 bottom-0 bg-black/70 pointer-events-none"
-                        />
-                      )}
-                      {/* Dimmed trimmed-out right region */}
-                      {endPct < 100 && (
-                        <div
-                          style={{ left: `${endPct}%`, right: 0 }}
-                          className="absolute top-0 bottom-0 bg-black/70 pointer-events-none"
-                        />
-                      )}
-
-                      {/* Active draggable cut window */}
-                      <div
-                        style={{ left: `${startPct}%`, width: `${endPct - startPct}%` }}
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                          setSelectedClipId(clip.id);
-                          const lane = e.currentTarget.parentElement;
-                          trimDragRef.current = {
-                            active: true,
-                            clipId: clip.id,
-                            mode: 'window',
-                            startClientX: e.clientX,
-                            origTrimStart: clip.trimStart,
-                            origDuration: clip.duration,
-                            sourceDuration: srcTotal,
-                            laneWidthPx: lane?.getBoundingClientRect().width || 400,
-                          };
-                          e.currentTarget.setPointerCapture(e.pointerId);
-                        }}
-                        className="absolute top-0 bottom-0 border-y-2 border-amber-400/90 bg-amber-500/10 cursor-grab active:cursor-grabbing"
-                      >
-                        {/* Left trim handle */}
-                        <div
-                          title="Arraste para cortar início"
-                          onPointerDown={(e) => {
-                            e.stopPropagation();
-                            setSelectedClipId(clip.id);
-                            const lane = e.currentTarget.parentElement?.parentElement;
-                            trimDragRef.current = {
-                              active: true,
-                              clipId: clip.id,
-                              mode: 'left',
-                              startClientX: e.clientX,
-                              origTrimStart: clip.trimStart,
-                              origDuration: clip.duration,
-                              sourceDuration: srcTotal,
-                              laneWidthPx: lane?.getBoundingClientRect().width || 400,
-                            };
-                            e.currentTarget.setPointerCapture(e.pointerId);
-                          }}
-                          className="absolute -left-1.5 top-0 bottom-0 w-3.5 bg-amber-400 hover:bg-amber-300 rounded-l cursor-ew-resize touch-none flex items-center justify-center shadow"
-                        >
-                          <span className="w-0.5 h-6 bg-slate-950 rounded" />
-                        </div>
-
-                        {/* Right trim handle */}
-                        <div
-                          title="Arraste para cortar fim"
-                          onPointerDown={(e) => {
-                            e.stopPropagation();
-                            setSelectedClipId(clip.id);
-                            const lane = e.currentTarget.parentElement?.parentElement;
-                            trimDragRef.current = {
-                              active: true,
-                              clipId: clip.id,
-                              mode: 'right',
-                              startClientX: e.clientX,
-                              origTrimStart: clip.trimStart,
-                              origDuration: clip.duration,
-                              sourceDuration: srcTotal,
-                              laneWidthPx: lane?.getBoundingClientRect().width || 400,
-                            };
-                            e.currentTarget.setPointerCapture(e.pointerId);
-                          }}
-                          className="absolute -right-1.5 top-0 bottom-0 w-3.5 bg-amber-400 hover:bg-amber-300 rounded-r cursor-ew-resize touch-none flex items-center justify-center shadow"
-                        >
-                          <span className="w-0.5 h-6 bg-slate-950 rounded" />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Right: Audio Inspector (Gain, Trim, Fade, 3-Band EQ) */}
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3.5">
+        {/* Right: Audio Inspector (Gain, Trim, Fade, 3-Band EQ) — placed side-by-side cleanly while timeline floats/retracts below */}
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-2.5">
           {selectedClip ? (
             <>
               <div className="flex items-center gap-2 pb-2 border-b border-white/8">
@@ -769,6 +665,352 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Retractable Aerial Draggable Audio Waveform Timeline (48px waveforms) */}
+      <AerialTimeline
+        title="Faixas de Áudio"
+        subtitle={`${project.audioClips.length} faixa(s) · Arraste as bordas na onda para cortar`}
+        headerExtra={
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={startPlayback}
+              className="h-5 px-2 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+            >
+              <Play className="w-2.5 h-2.5 fill-current" />
+              PLAY
+            </button>
+            <button
+              type="button"
+              onClick={stopPlayback}
+              className="h-5 px-2 rounded bg-[#1A1E28] hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+            >
+              <Square className="w-2.5 h-2.5 fill-current" />
+              STOP
+            </button>
+          </div>
+        }
+      >
+        <div
+          onPointerMove={handleTrimPointerMove}
+          onPointerUp={handleTrimPointerUp}
+          onPointerCancel={handleTrimPointerUp}
+          className="space-y-1.5"
+        >
+          {project.audioClips.length === 0 ? (
+            <div className="py-5 text-center space-y-1">
+              <p className="text-xs text-slate-300">Nenhuma faixa de áudio adicionada.</p>
+              <p className="text-[10px] text-slate-400">
+                Importe uma música ou gere um loop sintetizado no painel esquerdo.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {project.audioClips.map((clip) => {
+                const active = clip.id === selectedClipId;
+                const srcTotal = Math.max(0.2, clip.sourceDuration || clip.duration);
+                const startPct = Math.max(0, Math.min(98, (clip.trimStart / srcTotal) * 100));
+                const endPct = Math.max(
+                  startPct + 2,
+                  Math.min(100, ((clip.trimStart + clip.duration) / srcTotal) * 100)
+                );
+                const trimEnd = Math.min(srcTotal, clip.trimStart + clip.duration);
+
+                return (
+                  <div
+                    key={clip.id}
+                    onClick={() => setSelectedClipId(clip.id)}
+                    className={`rounded-lg border p-2 space-y-1.5 transition-colors cursor-pointer ${
+                      active
+                        ? 'border-amber-500 bg-amber-500/10'
+                        : 'border-white/10 bg-[#1A1E28] hover:border-white/20'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0 flex items-center gap-2">
+                        <span className="text-[11px] font-semibold text-white truncate">{clip.name}</span>
+                        <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                          {clip.trimStart.toFixed(1)}s→{trimEnd.toFixed(1)}s ({clip.duration.toFixed(1)}s)
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUpdateProject({
+                              ...project,
+                              audioClips: project.audioClips.map((c) =>
+                                c.id === clip.id ? { ...c, muted: !c.muted } : c
+                              ),
+                            });
+                          }}
+                          className={`p-1 rounded cursor-pointer ${
+                            clip.muted ? 'bg-red-500/20 text-red-400' : 'text-slate-300 hover:bg-white/10'
+                          }`}
+                          title="Silenciar"
+                        >
+                          {clip.muted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUpdateProject({
+                              ...project,
+                              audioClips: project.audioClips.filter((c) => c.id !== clip.id),
+                            });
+                            if (selectedClipId === clip.id) setSelectedClipId(null);
+                          }}
+                          className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-white/10 cursor-pointer"
+                          title="Apagar faixa"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startPlayback();
+                          }}
+                          className="h-5 px-1.5 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+                          title="Reproduzir mix"
+                        >
+                          <Play className="w-2.5 h-2.5 fill-current" />
+                          PLAY
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            stopPlayback();
+                          }}
+                          className="h-5 px-1.5 rounded bg-[#0B0D11] hover:bg-white/10 border border-white/15 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+                          title="Parar áudio"
+                        >
+                          <Square className="w-2.5 h-2.5 fill-current" />
+                          STOP
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Interactive Drag-to-Trim Waveform Bars (48px = h-12) */}
+                    <div className="h-12 rounded-md bg-[#0B0D11] relative overflow-hidden select-none touch-none border border-white/8">
+                      <div className="absolute inset-0 px-2 flex items-center gap-[2px] pointer-events-none">
+                        {clip.peaks.map((pk, idx) => (
+                          <div
+                            key={idx}
+                            style={{ height: `${Math.max(12, Math.round(pk * 100))}%` }}
+                            className={`flex-1 rounded-full ${
+                              clip.muted
+                                ? 'bg-slate-700'
+                                : active
+                                ? 'bg-amber-400'
+                                : 'bg-cyan-500/75'
+                            }`}
+                          />
+                        ))}
+                      </div>
+
+                      {startPct > 0 && (
+                        <div
+                          style={{ width: `${startPct}%` }}
+                          className="absolute left-0 top-0 bottom-0 bg-black/70 pointer-events-none"
+                        />
+                      )}
+                      {endPct < 100 && (
+                        <div
+                          style={{ left: `${endPct}%`, right: 0 }}
+                          className="absolute top-0 bottom-0 bg-black/70 pointer-events-none"
+                        />
+                      )}
+
+                      <div
+                        style={{ left: `${startPct}%`, width: `${endPct - startPct}%` }}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          setSelectedClipId(clip.id);
+                          const lane = e.currentTarget.parentElement;
+                          const rect = lane?.getBoundingClientRect();
+                          const clickRatio = rect
+                            ? Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)))
+                            : 0;
+                          const clickSourceTime = Number((clickRatio * srcTotal).toFixed(2));
+                          trimDragRef.current = {
+                            active: true,
+                            moved: false,
+                            clipId: clip.id,
+                            mode: 'window',
+                            startClientX: e.clientX,
+                            clickSourceTime,
+                            origTrimStart: clip.trimStart,
+                            origDuration: clip.duration,
+                            sourceDuration: srcTotal,
+                            laneWidthPx: rect?.width || 400,
+                          };
+                        }}
+                        className="absolute top-0 bottom-0 border-y-2 border-amber-400/90 bg-amber-500/10 cursor-pointer"
+                        title="Clique em qualquer ponto da onda para cortar"
+                      >
+                        <div
+                          title="Arraste para cortar início"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            setSelectedClipId(clip.id);
+                            const lane = e.currentTarget.parentElement?.parentElement;
+                            trimDragRef.current = {
+                              active: true,
+                              moved: false,
+                              clipId: clip.id,
+                              mode: 'left',
+                              startClientX: e.clientX,
+                              clickSourceTime: clip.trimStart,
+                              origTrimStart: clip.trimStart,
+                              origDuration: clip.duration,
+                              sourceDuration: srcTotal,
+                              laneWidthPx: lane?.getBoundingClientRect().width || 400,
+                            };
+                            e.currentTarget.setPointerCapture(e.pointerId);
+                          }}
+                          className="absolute -left-1 top-0 bottom-0 w-3 bg-amber-400 hover:bg-amber-300 rounded-l cursor-ew-resize touch-none flex items-center justify-center shadow"
+                        >
+                          <span className="w-0.5 h-5 bg-slate-950 rounded" />
+                        </div>
+
+                        <div
+                          title="Arraste para cortar fim"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            setSelectedClipId(clip.id);
+                            const lane = e.currentTarget.parentElement?.parentElement;
+                            trimDragRef.current = {
+                              active: true,
+                              moved: false,
+                              clipId: clip.id,
+                              mode: 'right',
+                              startClientX: e.clientX,
+                              clickSourceTime: clip.trimStart + clip.duration,
+                              origTrimStart: clip.trimStart,
+                              origDuration: clip.duration,
+                              sourceDuration: srcTotal,
+                              laneWidthPx: lane?.getBoundingClientRect().width || 400,
+                            };
+                            e.currentTarget.setPointerCapture(e.pointerId);
+                          }}
+                          className="absolute -right-1 top-0 bottom-0 w-3 bg-amber-400 hover:bg-amber-300 rounded-r cursor-ew-resize touch-none flex items-center justify-center shadow"
+                        >
+                          <span className="w-0.5 h-5 bg-slate-950 rounded" />
+                        </div>
+                      </div>
+
+                      {cutAnchor?.clipId === clip.id && (
+                        <div
+                          style={{ left: `${(cutAnchor.sourceTime / srcTotal) * 100}%` }}
+                          className="absolute top-0 bottom-0 w-0.5 bg-rose-400 pointer-events-none z-20"
+                        />
+                      )}
+                    </div>
+
+                    {cutAnchor?.clipId === clip.id && (
+                      <div className="relative h-7">
+                        <div
+                          style={{
+                            left: `${Math.max(0, Math.min(28, (cutAnchor.sourceTime / srcTotal) * 100))}%`,
+                          }}
+                          className="absolute top-0 inline-flex items-center gap-1 rounded-md bg-[#0B0D11] border border-rose-400/60 px-2 py-0.5 z-20"
+                        >
+                          <span className="text-[10px] font-mono font-bold text-rose-300 inline-flex items-center gap-1">
+                            <Scissors className="w-2.5 h-2.5" />
+                            {cutAnchor.sourceTime.toFixed(1)}s
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              splitAudioAt(clip.id, cutAnchor.sourceTime);
+                            }}
+                            className="h-5 px-1.5 rounded bg-rose-500 hover:bg-rose-400 text-[10px] font-bold text-white cursor-pointer"
+                          >
+                            Cortar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              cutAudioStartAt(clip.id, cutAnchor.sourceTime);
+                            }}
+                            className="h-5 px-1.5 rounded bg-[#1A1E28] hover:bg-white/10 text-[10px] text-amber-300 cursor-pointer"
+                          >
+                            Cortar Início
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              cutAudioEndAt(clip.id, cutAnchor.sourceTime);
+                            }}
+                            className="h-5 px-1.5 rounded bg-[#1A1E28] hover:bg-white/10 text-[10px] text-amber-300 cursor-pointer"
+                          >
+                            Cortar Fim
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onUpdateProject({
+                                ...project,
+                                audioClips: project.audioClips.filter((c) => c.id !== clip.id),
+                              });
+                              if (selectedClipId === clip.id) setSelectedClipId(null);
+                              setCutAnchor(null);
+                            }}
+                            className="h-5 px-1.5 rounded bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-[10px] font-semibold text-red-200 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-2.5 h-2.5" />
+                            Apagar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startPlayback();
+                            }}
+                            className="h-5 px-1.5 rounded bg-amber-500 hover:bg-amber-400 text-[10px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Play className="w-2.5 h-2.5 fill-current" />
+                            PLAY
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              stopPlayback();
+                            }}
+                            className="h-5 px-1.5 rounded bg-[#1A1E28] hover:bg-white/10 border border-white/15 text-[10px] font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Square className="w-2.5 h-2.5 fill-current" />
+                            STOP
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setCutAnchor(null);
+                            }}
+                            className="h-5 w-5 rounded text-slate-400 hover:text-white inline-flex items-center justify-center cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </AerialTimeline>
     </div>
   );
 };

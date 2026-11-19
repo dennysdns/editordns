@@ -51,8 +51,10 @@ export const SpecialEffectsView: React.FC<SpecialEffectsViewProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const w = 540;
-    const h = 960;
+    const aspect = Math.max(0.25, project.width / Math.max(1, project.height));
+    const maxDim = 960;
+    const w = aspect >= 1 ? maxDim : Math.round(maxDim * aspect);
+    const h = aspect >= 1 ? Math.round(maxDim / aspect) : maxDim;
     canvas.width = w;
     canvas.height = h;
 
@@ -113,8 +115,8 @@ export const SpecialEffectsView: React.FC<SpecialEffectsViewProps> = ({
         kind: 'image',
         mimeType: 'image/png',
         size: blob.size,
-        width: 540,
-        height: 960,
+        width: canvasRef.current?.width || 540,
+        height: canvasRef.current?.height || 960,
         blob,
         thumbnailDataUrl: canvasRef.current?.toDataURL('image/png'),
         createdAt: Date.now(),
@@ -136,56 +138,56 @@ export const SpecialEffectsView: React.FC<SpecialEffectsViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 pb-24 lg:pb-8 space-y-5">
-      <div className="rounded-2xl bg-[#13161D] border border-white/8 p-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="max-w-7xl mx-auto px-3 sm:px-5 py-3 pb-20 lg:pb-6 space-y-3">
+      <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="text-lg font-bold text-white">Laboratório de Efeitos Especiais</h1>
-          <p className="text-xs text-slate-400">
+          <h1 className="text-sm font-bold text-white">Laboratório de Efeitos Especiais</h1>
+          <p className="text-[11px] text-slate-400">
             Filtros de imagem, distorção Glitch RGB, pixelização, granulação, vinheta e partículas animadas
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
             onClick={() => {
               setEffects({ ...DEFAULT_EFFECTS });
               setParticles('none');
             }}
-            className="min-h-[40px] px-3 rounded-xl bg-[#1A1E28] hover:bg-white/10 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-[11px] font-medium text-slate-200 inline-flex items-center gap-1 cursor-pointer"
           >
-            <RotateCcw className="w-3.5 h-3.5" />
+            <RotateCcw className="w-3 h-3" />
             Resetar
           </button>
           <button
             onClick={applyToActiveProject}
-            className="min-h-[40px] px-4 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-300 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
           >
-            <CheckCircle2 className="w-4 h-4" />
+            <CheckCircle2 className="w-3.5 h-3.5" />
             Aplicar ao Projeto
           </button>
           <button
             onClick={handleExportFrame}
-            className="min-h-[40px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-3.5 h-3.5" />
             Exportar Imagem FX
           </button>
         </div>
       </div>
 
       {notice && (
-        <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-2.5 text-xs text-emerald-300">
+        <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-[11px] text-emerald-300">
           {notice}
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5 items-start">
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-3 items-start">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <select
               value={sourceMediaId}
               onChange={(e) => setSourceMediaId(e.target.value)}
-              className="rounded-lg bg-[#0B0D11] border border-white/12 px-3 py-2 text-xs text-white"
+              className="h-7 rounded-lg bg-[#0B0D11] border border-white/12 px-2 text-[11px] text-white"
             >
               <option value="">Cena do Projeto Atual</option>
               {imageMedia.map((m) => (
@@ -195,7 +197,7 @@ export const SpecialEffectsView: React.FC<SpecialEffectsViewProps> = ({
               ))}
             </select>
 
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap gap-1">
               {[
                 { id: 'cinema', label: 'Cinema' },
                 { id: 'glitch', label: 'Glitch Digital' },
@@ -205,7 +207,7 @@ export const SpecialEffectsView: React.FC<SpecialEffectsViewProps> = ({
                 <button
                   key={p.id}
                   onClick={() => applyPreset(p.id as 'cinema' | 'glitch' | 'noir' | 'vintage')}
-                  className="px-2.5 py-1.5 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-xs text-slate-200 cursor-pointer"
+                  className="h-7 px-2 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-[11px] text-slate-200 cursor-pointer"
                 >
                   {p.label}
                 </button>
@@ -214,13 +216,13 @@ export const SpecialEffectsView: React.FC<SpecialEffectsViewProps> = ({
           </div>
 
           <div className="rounded-xl bg-[#0B0D11] border border-white/10 overflow-hidden p-2 flex items-center justify-center">
-            <canvas ref={canvasRef} className="max-h-[480px] w-auto max-w-full h-auto mx-auto block rounded-lg" />
+            <canvas ref={canvasRef} className="max-h-[420px] w-auto max-w-full h-auto mx-auto block rounded-lg" />
           </div>
         </div>
 
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3 max-h-[600px] overflow-y-auto">
-          <h3 className="text-sm font-semibold text-white flex items-center gap-1.5 pb-2 border-b border-white/8">
-            <Sparkles className="w-4 h-4 text-amber-400" />
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-2.5 max-h-[540px] overflow-y-auto">
+          <h3 className="text-xs font-semibold text-white flex items-center gap-1.5 pb-1.5 border-b border-white/8">
+            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
             Controles de Efeitos
           </h3>
 

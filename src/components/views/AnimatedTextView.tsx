@@ -146,35 +146,35 @@ export const AnimatedTextView: React.FC<AnimatedTextViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 pb-24 lg:pb-8 space-y-5">
-      <div className="rounded-2xl bg-[#13161D] border border-white/8 p-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="max-w-7xl mx-auto px-3 sm:px-5 py-3 pb-20 lg:pb-6 space-y-3">
+      <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="text-lg font-bold text-white">Editor de Texto Animado e Títulos</h1>
-          <p className="text-xs text-slate-400">
+          <h1 className="text-sm font-bold text-white">Editor de Texto Animado e Títulos</h1>
+          <p className="text-[11px] text-slate-400">
             Crie títulos cinéticos offline com contorno, sombra e animações prontas para cena
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
             onClick={addToAnimationStudio}
-            className="min-h-[40px] px-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Clapperboard className="w-4 h-4" />
+            <Clapperboard className="w-3.5 h-3.5" />
             Adicionar à Animação
           </button>
           <button
             onClick={addToVideoEditor}
-            className="min-h-[40px] px-3.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-xs font-bold text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+            className="h-7 px-2.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-[11px] font-bold text-slate-950 inline-flex items-center gap-1 cursor-pointer"
           >
-            <Film className="w-4 h-4" />
+            <Film className="w-3.5 h-3.5" />
             Adicionar ao Vídeo
           </button>
         </div>
       </div>
 
       {notice && (
-        <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-2.5 text-xs text-emerald-300 flex items-center justify-between gap-2">
+        <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-[11px] text-emerald-300 flex items-center justify-between gap-2">
           <span>{notice}</span>
           <div className="flex gap-2">
             <button
@@ -193,33 +193,33 @@ export const AnimatedTextView: React.FC<AnimatedTextViewProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5 items-start">
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-3 items-start">
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-2.5">
           <div className="flex items-center justify-between">
             <button
               onClick={() => setPlaying((p) => !p)}
-              className="min-h-[38px] px-3 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-xs text-white inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-7 px-2.5 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-[11px] text-white inline-flex items-center gap-1 cursor-pointer"
             >
-              <Play className="w-3.5 h-3.5 text-amber-400" />
+              <Play className="w-3 h-3 text-amber-400" />
               {playing ? 'Pausar Prévia' : 'Reproduzir Prévia'}
             </button>
             <button
               onClick={() => setProgress(0)}
-              className="min-h-[38px] px-3 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-xs text-slate-300 inline-flex items-center gap-1.5 cursor-pointer"
+              className="h-7 px-2.5 rounded-lg bg-[#1A1E28] hover:bg-white/10 text-[11px] text-slate-300 inline-flex items-center gap-1 cursor-pointer"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
+              <RotateCcw className="w-3 h-3" />
               Reiniciar
             </button>
           </div>
 
           <div className="rounded-xl bg-[#0B0D11] border border-white/10 overflow-hidden">
-            <canvas ref={canvasRef} className="w-full max-h-[420px] object-contain" />
+            <canvas ref={canvasRef} className="w-full max-h-[380px] object-contain" />
           </div>
         </div>
 
-        <div className="rounded-xl bg-[#13161D] border border-white/8 p-4 space-y-3.5">
-          <h3 className="text-sm font-semibold text-white flex items-center gap-1.5 pb-2 border-b border-white/8">
-            <Type className="w-4 h-4 text-amber-400" />
+        <div className="rounded-xl bg-[#13161D] border border-white/8 p-3 space-y-2.5">
+          <h3 className="text-xs font-semibold text-white flex items-center gap-1.5 pb-1.5 border-b border-white/8">
+            <Type className="w-3.5 h-3.5 text-amber-400" />
             Propriedades do Texto
           </h3>
 

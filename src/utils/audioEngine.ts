@@ -1,6 +1,79 @@
 import { AudioClip } from '../types/studio';
 
 let sharedAudioCtx: AudioContext | null = null;
+let sharedMasterGain: GainNode | null = null;
+
+const VOLUME_STORAGE_KEY = 'super-animator-master-volume-v1';
+
+interface MasterVolumeState {
+  volume: number; // 0..1
+  muted: boolean;
+}
+
+const loadInitialMasterVolume = (): MasterVolumeState => {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(VOLUME_STORAGE_KEY) : null;
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<MasterVolumeState>;
+      return {
+        volume: typeof parsed.volume === 'number' ? Math.max(0, Math.min(1, parsed.volume)) : 1,
+        muted: Boolean(parsed.muted),
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { volume: 1, muted: false };
+};
+
+let masterVolumeState: MasterVolumeState = loadInitialMasterVolume();
+const volumeListeners = new Set<(state: MasterVolumeState) => void>();
+
+export function getEffectiveMasterVolume(): number {
+  return masterVolumeState.muted ? 0 : masterVolumeState.volume;
+}
+
+export function getMasterVolumeState(): MasterVolumeState {
+  return { ...masterVolumeState };
+}
+
+export function setMasterVolumeState(next: Partial<MasterVolumeState>): MasterVolumeState {
+  masterVolumeState = {
+    volume:
+      typeof next.volume === 'number'
+        ? Math.max(0, Math.min(1, next.volume))
+        : masterVolumeState.volume,
+    muted: typeof next.muted === 'boolean' ? next.muted : masterVolumeState.muted,
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(VOLUME_STORAGE_KEY, JSON.stringify(masterVolumeState));
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  if (sharedMasterGain && sharedAudioCtx) {
+    sharedMasterGain.gain.setValueAtTime(
+      getEffectiveMasterVolume(),
+      sharedAudioCtx.currentTime
+    );
+  }
+
+  const snapshot = { ...masterVolumeState };
+  volumeListeners.forEach((cb) => cb(snapshot));
+  return snapshot;
+}
+
+export function subscribeMasterVolume(
+  listener: (state: MasterVolumeState) => void
+): () => void {
+  volumeListeners.add(listener);
+  return () => {
+    volumeListeners.delete(listener);
+  };
+}
 
 export function getAudioContext(): AudioContext {
   if (!sharedAudioCtx) {
@@ -11,6 +84,16 @@ export function getAudioContext(): AudioContext {
     void sharedAudioCtx.resume();
   }
   return sharedAudioCtx;
+}
+
+export function getMasterDestination(): AudioNode {
+  const ctx = getAudioContext();
+  if (!sharedMasterGain || sharedMasterGain.context !== ctx) {
+    sharedMasterGain = ctx.createGain();
+    sharedMasterGain.gain.value = getEffectiveMasterVolume();
+    sharedMasterGain.connect(ctx.destination);
+  }
+  return sharedMasterGain;
 }
 
 export async function decodeAudioBlob(

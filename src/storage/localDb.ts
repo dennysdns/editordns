@@ -117,6 +117,11 @@ export function resizeProjectDimensions(
         })),
       })),
     })),
+    videoClips: project.videoClips.map((clip) => ({
+      ...clip,
+      x: Math.round(clip.x * rx),
+      y: Math.round(clip.y * ry),
+    })),
   };
 }
 
@@ -287,8 +292,8 @@ export function createStarterProject(
 
 export function createBlankProject(
   name: string,
-  _width = 1080,
-  _height = 1920,
+  width = 1080,
+  height = 1920,
   fps = 24,
   lastTool: StudioProject['lastTool'] = 'animation'
 ): StudioProject {
@@ -296,8 +301,8 @@ export function createBlankProject(
   return {
     id: `proj-${now}`,
     name: name.trim() || 'Novo Projeto',
-    width: 1080,
-    height: 1920,
+    width,
+    height,
     fps,
     lastTool,
     createdAt: now,
@@ -376,17 +381,14 @@ export const localDb = {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
       if (!raw) return DEFAULT_SETTINGS;
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(raw), defaultWidth: 1080, defaultHeight: 1920 };
+      return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
     } catch {
       return DEFAULT_SETTINGS;
     }
   },
 
   saveSettings(settings: StudioSettings): void {
-    localStorage.setItem(
-      SETTINGS_KEY,
-      JSON.stringify({ ...settings, defaultWidth: 1080, defaultHeight: 1920 })
-    );
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   },
 
   async clearAllData(): Promise<void> {
