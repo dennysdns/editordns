@@ -438,7 +438,7 @@ export async function exportProjectVideoOffline(
       ctx.filter = buildCssFilterString(clip.effects || DEFAULT_EFFECTS);
       ctx.translate(options.width / 2 + clip.x * scaleX, options.height / 2 + clip.y * scaleY);
       ctx.rotate((clip.rotation * Math.PI) / 180);
-      ctx.scale(clip.scale, clip.scale);
+      ctx.scale(clip.scaleX ?? clip.scale, clip.scaleY ?? clip.scale);
 
       if (clip.kind === 'color') {
         ctx.fillStyle = clip.backgroundColor || '#1E293B';

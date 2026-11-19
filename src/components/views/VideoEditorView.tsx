@@ -23,8 +23,19 @@ import {
   ZoomIn,
   ZoomOut,
   RotateCcw,
+  MoveHorizontal,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { useStageZoom } from '../../hooks/useStageZoom';
+import {
+  EdgeHoverTarget,
+  StretchEdge,
+  computeEdgeStretch,
+  detectEdgeHit,
+  drawEdgeStretchHandles,
+  getEdgeStretchCursor,
+} from '../../utils/edgeStretch';
 import {
   AudioClip,
   DEFAULT_CHROMA_KEY,
@@ -104,18 +115,33 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     time: number;
   } | null>(null);
 
+  const [edgeStretchEnabled, setEdgeStretchEnabled] = useState(true);
+  const [hoverEdge, setHoverEdge] = useState<EdgeHoverTarget | null>(null);
+  const [hoverCursor, setHoverCursor] = useState<string | null>(null);
+  const [overlayPanelOpen, setOverlayPanelOpen] = useState(() =>
+    project.videoClips.some((c) => c.track === 'overlay')
+  );
+  const [overlayTrackOpen, setOverlayTrackOpen] = useState(() =>
+    project.videoClips.some((c) => c.track === 'overlay')
+  );
+
   const canvasDragRef = useRef<{
     active: boolean;
-    mode: 'move' | 'resize' | 'rotate';
+    mode: 'move' | 'resize' | 'stretch-edge' | 'rotate';
     clipId: string;
     startX: number;
     startY: number;
     origX: number;
     origY: number;
     origScale: number;
+    origScaleX: number;
+    origScaleY: number;
     origDist: number;
     origRotation: number;
     startAngle: number;
+    stretchEdge?: StretchEdge;
+    baseW?: number;
+    baseH?: number;
   }>({
     active: false,
     mode: 'move',
@@ -125,6 +151,8 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     origX: 0,
     origY: 0,
     origScale: 1,
+    origScaleX: 1,
+    origScaleY: 1,
     origDist: 100,
     origRotation: 0,
     startAngle: 0,
@@ -324,6 +352,11 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     });
   }, []);
 
+  const getClipScale = (clip: VideoClip): { sx: number; sy: number } => ({
+    sx: clip.scaleX ?? clip.scale,
+    sy: clip.scaleY ?? clip.scale,
+  });
+
   const getClipBaseDims = (clip: VideoClip): { w: number; h: number } => {
     if (clip.kind === 'image' && clip.mediaId) {
       const decodedGif = gifCache.get(clip.mediaId);
@@ -393,12 +426,13 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         alpha *= Math.max(0, (playLen - elapsed) / 0.5);
       }
 
+      const { sx, sy } = getClipScale(clip);
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.filter = buildCssFilterString(clip.effects || DEFAULT_EFFECTS);
       ctx.translate(project.width / 2 + clip.x, project.height / 2 + clip.y);
       ctx.rotate((clip.rotation * Math.PI) / 180);
-      ctx.scale(clip.scale, clip.scale);
+      ctx.scale(sx, sy);
 
       if (clip.kind === 'color') {
         ctx.fillStyle = clip.backgroundColor || '#1E293B';
@@ -488,8 +522,9 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
       const isActiveSel = activeClips.some((c) => c.id === selectedClip.id);
       if (isActiveSel) {
         const { w, h } = getClipBaseDims(selectedClip);
-        const halfW = (w * Math.abs(selectedClip.scale)) / 2 + 10;
-        const halfH = (h * Math.abs(selectedClip.scale)) / 2 + 10;
+        const { sx, sy } = getClipScale(selectedClip);
+        const halfW = (w * Math.abs(sx)) / 2 + 10;
+        const halfH = (h * Math.abs(sy)) / 2 + 10;
         const cx = project.width / 2 + selectedClip.x;
         const cy = project.height / 2 + selectedClip.y;
 
@@ -533,9 +568,53 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         ctx.fill();
 
         ctx.restore();
+
+        if (edgeStretchEnabled) {
+          drawEdgeStretchHandles(ctx, {
+            cx,
+            cy,
+            halfW,
+            halfH,
+            rotationDeg: selectedClip.rotation,
+            hoveredEdge: hoverEdge?.id === selectedClip.id ? hoverEdge.edge : null,
+            drawPreviewOutline: false,
+          });
+        }
       }
     }
-  }, [project, currentTime, imageCache, gifCache, videoCache, isPlaying, renderTick, selectedClip]);
+
+    // Hover preview when passing mouse over the edge/end of an unselected clip
+    if (!isPlaying && edgeStretchEnabled && hoverEdge && hoverEdge.id !== selectedClipId) {
+      const hoveredClip = activeClips.find((c) => c.id === hoverEdge.id);
+      if (hoveredClip) {
+        const { w, h } = getClipBaseDims(hoveredClip);
+        const { sx, sy } = getClipScale(hoveredClip);
+        const halfW = (w * Math.abs(sx)) / 2 + 10;
+        const halfH = (h * Math.abs(sy)) / 2 + 10;
+        drawEdgeStretchHandles(ctx, {
+          cx: project.width / 2 + hoveredClip.x,
+          cy: project.height / 2 + hoveredClip.y,
+          halfW,
+          halfH,
+          rotationDeg: hoveredClip.rotation,
+          hoveredEdge: hoverEdge.edge,
+          drawPreviewOutline: true,
+        });
+      }
+    }
+  }, [
+    project,
+    currentTime,
+    imageCache,
+    gifCache,
+    videoCache,
+    isPlaying,
+    renderTick,
+    selectedClip,
+    selectedClipId,
+    edgeStretchEnabled,
+    hoverEdge,
+  ]);
 
   const toCanvasCoords = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -584,11 +663,59 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
       })
       .sort((a, b) => (a.track === b.track ? 0 : a.track === 'video' ? -1 : 1));
 
+    const findClipEdgeTarget = (
+      probe: { x: number; y: number }
+    ): { clip: VideoClip; edge: StretchEdge } | null => {
+      if (selectedClip && activeClips.some((c) => c.id === selectedClip.id)) {
+        const { w, h } = getClipBaseDims(selectedClip);
+        const { sx, sy } = getClipScale(selectedClip);
+        const hw = (w * Math.abs(sx)) / 2 + 10;
+        const hh = (h * Math.abs(sy)) / 2 + 10;
+        const edge = detectEdgeHit(
+          probe,
+          {
+            cx: project.width / 2 + selectedClip.x,
+            cy: project.height / 2 + selectedClip.y,
+            halfW: hw,
+            halfH: hh,
+            rotationDeg: selectedClip.rotation,
+          },
+          24,
+          18
+        );
+        if (edge) return { clip: selectedClip, edge };
+      }
+
+      for (let i = activeClips.length - 1; i >= 0; i--) {
+        const clip = activeClips[i];
+        if (clip.id === selectedClipId) continue;
+        const { w, h } = getClipBaseDims(clip);
+        const { sx, sy } = getClipScale(clip);
+        const hw = (w * Math.abs(sx)) / 2 + 10;
+        const hh = (h * Math.abs(sy)) / 2 + 10;
+        const edge = detectEdgeHit(
+          probe,
+          {
+            cx: project.width / 2 + clip.x,
+            cy: project.height / 2 + clip.y,
+            halfW: hw,
+            halfH: hh,
+            rotationDeg: clip.rotation,
+          },
+          22,
+          12
+        );
+        if (edge) return { clip, edge };
+      }
+      return null;
+    };
+
     // Check resize & rotation handles of currently selected clip
     if (selectedClip && activeClips.some((c) => c.id === selectedClip.id)) {
       const { w, h } = getClipBaseDims(selectedClip);
-      const halfW = (w * Math.abs(selectedClip.scale)) / 2 + 10;
-      const halfH = (h * Math.abs(selectedClip.scale)) / 2 + 10;
+      const { sx, sy } = getClipScale(selectedClip);
+      const halfW = (w * Math.abs(sx)) / 2 + 10;
+      const halfH = (h * Math.abs(sy)) / 2 + 10;
       const { rx, ry, cx, cy } = toClipLocalSpace(pt, selectedClip);
 
       if (Math.hypot(rx, ry - (-halfH - 46)) <= 44) {
@@ -601,6 +728,8 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
           origX: selectedClip.x,
           origY: selectedClip.y,
           origScale: selectedClip.scale,
+          origScaleX: sx,
+          origScaleY: sy,
           origDist: 100,
           origRotation: selectedClip.rotation,
           startAngle: Math.atan2(pt.y - cy, pt.x - cx),
@@ -625,9 +754,45 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
           origX: selectedClip.x,
           origY: selectedClip.y,
           origScale: selectedClip.scale,
+          origScaleX: sx,
+          origScaleY: sy,
           origDist: Math.max(20, Math.hypot(pt.x - cx, pt.y - cy)),
           origRotation: selectedClip.rotation,
           startAngle: 0,
+        };
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        return;
+      }
+    }
+
+    // Check edge stretch handle on selected or hovered clip when pointer is on the edge/end
+    if (edgeStretchEnabled) {
+      const edgeHit = findClipEdgeTarget(pt);
+      if (edgeHit) {
+        const target = edgeHit.clip;
+        const { w, h } = getClipBaseDims(target);
+        const { sx, sy } = getClipScale(target);
+        setSelectedClipId(target.id);
+        setSelectedAudioClipId(null);
+        setHoverEdge({ id: target.id, edge: edgeHit.edge });
+        setHoverCursor(getEdgeStretchCursor(edgeHit.edge, target.rotation));
+        canvasDragRef.current = {
+          active: true,
+          mode: 'stretch-edge',
+          clipId: target.id,
+          startX: pt.x,
+          startY: pt.y,
+          origX: target.x,
+          origY: target.y,
+          origScale: target.scale,
+          origScaleX: sx,
+          origScaleY: sy,
+          origDist: 100,
+          origRotation: target.rotation,
+          startAngle: 0,
+          stretchEdge: edgeHit.edge,
+          baseW: w,
+          baseH: h,
         };
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
         return;
@@ -639,8 +804,9 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     for (let i = activeClips.length - 1; i >= 0; i--) {
       const clip = activeClips[i];
       const { w, h } = getClipBaseDims(clip);
-      const halfW = (w * Math.abs(clip.scale)) / 2 + 18;
-      const halfH = (h * Math.abs(clip.scale)) / 2 + 18;
+      const { sx, sy } = getClipScale(clip);
+      const halfW = (w * Math.abs(sx)) / 2 + 18;
+      const halfH = (h * Math.abs(sy)) / 2 + 18;
       const { rx, ry } = toClipLocalSpace(pt, clip);
       if (Math.abs(rx) <= halfW && Math.abs(ry) <= halfH) {
         hitClip = clip;
@@ -652,6 +818,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
       if (e.pointerType === 'touch' && stageZoom.handleTouchDoubleTapCheck(e.clientX, e.clientY, true)) {
         return;
       }
+      const { sx, sy } = getClipScale(hitClip);
       setSelectedClipId(hitClip.id);
       setSelectedAudioClipId(null);
       canvasDragRef.current = {
@@ -663,6 +830,8 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         origX: hitClip.x,
         origY: hitClip.y,
         origScale: hitClip.scale,
+        origScaleX: sx,
+        origScaleY: sy,
         origDist: 100,
         origRotation: hitClip.rotation,
         startAngle: 0,
@@ -685,10 +854,82 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     if (stageZoom.isMultiTouchBlocked()) return;
     if (stageZoom.movePanDrag(e.clientX, e.clientY)) return;
     const drag = canvasDragRef.current;
-    if (!drag.active) return;
+    const pt = toCanvasCoords(e.clientX, e.clientY);
+
+    if (!drag.active) {
+      if (!isPlaying && edgeStretchEnabled) {
+        const activeClips = project.videoClips
+          .filter((c) => {
+            const end = c.startTime + c.duration / Math.max(0.25, c.speed);
+            return currentTime >= c.startTime && currentTime <= end;
+          })
+          .sort((a, b) => (a.track === b.track ? 0 : a.track === 'video' ? -1 : 1));
+
+        let nextTarget: EdgeHoverTarget | null = null;
+        let nextCursor: string | null = null;
+
+        if (selectedClip && activeClips.some((c) => c.id === selectedClip.id)) {
+          const { w, h } = getClipBaseDims(selectedClip);
+          const { sx, sy } = getClipScale(selectedClip);
+          const edge = detectEdgeHit(
+            pt,
+            {
+              cx: project.width / 2 + selectedClip.x,
+              cy: project.height / 2 + selectedClip.y,
+              halfW: (w * Math.abs(sx)) / 2 + 10,
+              halfH: (h * Math.abs(sy)) / 2 + 10,
+              rotationDeg: selectedClip.rotation,
+            },
+            24,
+            18
+          );
+          if (edge) {
+            nextTarget = { id: selectedClip.id, edge };
+            nextCursor = getEdgeStretchCursor(edge, selectedClip.rotation);
+          }
+        }
+
+        if (!nextTarget) {
+          for (let i = activeClips.length - 1; i >= 0; i--) {
+            const c = activeClips[i];
+            if (c.id === selectedClipId) continue;
+            const { w, h } = getClipBaseDims(c);
+            const { sx, sy } = getClipScale(c);
+            const edge = detectEdgeHit(
+              pt,
+              {
+                cx: project.width / 2 + c.x,
+                cy: project.height / 2 + c.y,
+                halfW: (w * Math.abs(sx)) / 2 + 10,
+                halfH: (h * Math.abs(sy)) / 2 + 10,
+                rotationDeg: c.rotation,
+              },
+              22,
+              12
+            );
+            if (edge) {
+              nextTarget = { id: c.id, edge };
+              nextCursor = getEdgeStretchCursor(edge, c.rotation);
+              break;
+            }
+          }
+        }
+
+        if (nextTarget?.id !== hoverEdge?.id || nextTarget?.edge !== hoverEdge?.edge) {
+          setHoverEdge(nextTarget);
+        }
+        if (nextCursor !== hoverCursor) {
+          setHoverCursor(nextCursor);
+        }
+      } else if (hoverEdge || hoverCursor) {
+        setHoverEdge(null);
+        setHoverCursor(null);
+      }
+      return;
+    }
+
     const target = project.videoClips.find((c) => c.id === drag.clipId);
     if (!target) return;
-    const pt = toCanvasCoords(e.clientX, e.clientY);
 
     if (drag.mode === 'move') {
       const dx = pt.x - drag.startX;
@@ -701,17 +942,46 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
             : c
         ),
       });
+    } else if (drag.mode === 'stretch-edge' && drag.stretchEdge) {
+      const stretched = computeEdgeStretch({
+        edge: drag.stretchEdge,
+        pt,
+        origCx: project.width / 2 + drag.origX,
+        origCy: project.height / 2 + drag.origY,
+        baseW: drag.baseW || project.width,
+        baseH: drag.baseH || project.height,
+        origScaleX: drag.origScaleX,
+        origScaleY: drag.origScaleY,
+        rotationDeg: drag.origRotation,
+      });
+      const avgScale = Number(((Math.abs(stretched.scaleX) + Math.abs(stretched.scaleY)) / 2).toFixed(2));
+      onUpdateProject({
+        ...project,
+        videoClips: project.videoClips.map((c) =>
+          c.id === drag.clipId
+            ? {
+                ...c,
+                x: Math.round(stretched.cx - project.width / 2),
+                y: Math.round(stretched.cy - project.height / 2),
+                scale: avgScale,
+                scaleX: Number(stretched.scaleX.toFixed(2)),
+                scaleY: Number(stretched.scaleY.toFixed(2)),
+              }
+            : c
+        ),
+      });
     } else if (drag.mode === 'resize') {
       const cx = project.width / 2 + target.x;
       const cy = project.height / 2 + target.y;
       const dist = Math.hypot(pt.x - cx, pt.y - cy);
-      const nextScale = Number(
-        Math.max(0.1, Math.min(5, drag.origScale * (dist / Math.max(20, drag.origDist)))).toFixed(2)
-      );
+      const factor = dist / Math.max(20, drag.origDist);
+      const nextScale = Number(Math.max(0.1, Math.min(5, drag.origScale * factor)).toFixed(2));
+      const nextSx = Number(Math.max(0.1, Math.min(8, drag.origScaleX * factor)).toFixed(2));
+      const nextSy = Number(Math.max(0.1, Math.min(8, drag.origScaleY * factor)).toFixed(2));
       onUpdateProject({
         ...project,
         videoClips: project.videoClips.map((c) =>
-          c.id === drag.clipId ? { ...c, scale: nextScale } : c
+          c.id === drag.clipId ? { ...c, scale: nextScale, scaleX: nextSx, scaleY: nextSy } : c
         ),
       });
     } else if (drag.mode === 'rotate') {
@@ -770,6 +1040,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
       lastTool: 'video',
       videoClips: [...project.videoClips, clip],
     });
+    if (isOverlay) setOverlayTrackOpen(true);
     setSelectedClipId(clip.id);
     setSelectedAudioClipId(null);
   };
@@ -1031,6 +1302,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
       lastTool: 'video',
       videoClips: [...project.videoClips, overlayClip],
     });
+    setOverlayTrackOpen(true);
     setSelectedClipId(overlayClip.id);
     setSelectedAudioClipId(null);
   };
@@ -1225,6 +1497,20 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
     const dt = (dx / Math.max(120, drag.trackWidthPx)) * totalDuration;
 
     if (drag.kind === 'video') {
+      if (drag.mode === 'trim-right') {
+        const spd = Math.max(0.25, drag.speed);
+        const maxAvail = Math.max(0.2, drag.sourceDuration - drag.origTrimStart);
+        const nextDuration = Number(
+          Math.max(0.2, Math.min(maxAvail, drag.origDuration + dt * spd)).toFixed(2)
+        );
+        onUpdateProject({
+          ...project,
+          videoClips: project.videoClips.map((c) =>
+            c.id === drag.clipId ? { ...c, duration: nextDuration } : c
+          ),
+        });
+        return;
+      }
       const nextStart = Number(Math.max(0, drag.origStartTime + dt).toFixed(2));
       onUpdateProject({
         ...project,
@@ -1423,24 +1709,105 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
 
           {mediaBinTab === 'visual' ? (
             <>
-              <div className="grid grid-cols-1 gap-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    importTargetTrackRef.current = 'overlay';
-                    fileInputRef.current?.click();
-                  }}
-                  className="w-full h-7 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[11px] font-semibold text-cyan-200 flex items-center justify-center gap-1 cursor-pointer"
-                >
-                  <Layers className="w-3 h-3" />+ Criar Sobreposição
-                </button>
-                <button
-                  type="button"
-                  onClick={addOverlayTextClip}
-                  className="w-full h-7 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-[11px] font-semibold text-amber-300 flex items-center justify-center gap-1 cursor-pointer"
-                >
-                  <Type className="w-3 h-3" />+ Texto / Legenda
-                </button>
+              {/* Painel Retrátil de Sobreposição */}
+              <div className="rounded-lg bg-[#0F1218] border border-cyan-500/25 overflow-hidden">
+                <div className="flex items-center justify-between gap-1 px-2 py-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setOverlayPanelOpen((v) => !v)}
+                    className="flex-1 min-w-0 flex items-center gap-1.5 text-left text-[11px] font-semibold text-cyan-200 hover:text-white cursor-pointer"
+                    aria-expanded={overlayPanelOpen}
+                    title={overlayPanelOpen ? 'Retrair painel de sobreposição' : 'Abrir painel de sobreposição'}
+                  >
+                    {overlayPanelOpen ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    )}
+                    <Layers className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <span className="truncate">
+                      Sobreposição ({project.videoClips.filter((c) => c.track === 'overlay').length})
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOverlayPanelOpen(true);
+                      importTargetTrackRef.current = 'overlay';
+                      fileInputRef.current?.click();
+                    }}
+                    className="h-5 px-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-500/40 text-[10px] font-bold text-cyan-200 inline-flex items-center gap-0.5 cursor-pointer shrink-0"
+                    title="Adicionar mídia na sobreposição"
+                  >
+                    <Plus className="w-2.5 h-2.5" />
+                  </button>
+                </div>
+
+                {overlayPanelOpen && (
+                  <div className="px-2 pb-2 pt-1 border-t border-white/8 space-y-1.5">
+                    <div className="grid grid-cols-1 gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          importTargetTrackRef.current = 'overlay';
+                          fileInputRef.current?.click();
+                        }}
+                        className="w-full h-7 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[11px] font-semibold text-cyan-200 flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <Layers className="w-3 h-3" />+ Criar Sobreposição
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOverlayTrackOpen(true);
+                          addOverlayTextClip();
+                        }}
+                        className="w-full h-7 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-[11px] font-semibold text-amber-300 flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <Type className="w-3 h-3" />+ Texto / Legenda
+                      </button>
+                    </div>
+                    {project.videoClips.some((c) => c.track === 'overlay') && (
+                      <div className="max-h-24 overflow-y-auto space-y-1 pt-0.5">
+                        {project.videoClips
+                          .filter((c) => c.track === 'overlay')
+                          .map((ov) => (
+                            <div
+                              key={ov.id}
+                              onClick={() => {
+                                setSelectedClipId(ov.id);
+                                setSelectedAudioClipId(null);
+                                setCurrentTime(ov.startTime);
+                              }}
+                              className={`flex items-center justify-between gap-1 rounded px-1.5 py-0.5 text-[10px] border cursor-pointer ${
+                                selectedClipId === ov.id
+                                  ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-100'
+                                  : 'bg-[#1A1E28] border-white/5 text-slate-300 hover:border-cyan-500/30'
+                              }`}
+                            >
+                              <span className="truncate flex-1">{ov.name}</span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onUpdateProject({
+                                    ...project,
+                                    videoClips: project.videoClips.filter((c) => c.id !== ov.id),
+                                  });
+                                  if (selectedClipId === ov.id) setSelectedClipId(null);
+                                  if (cutAnchor?.clipId === ov.id) setCutAnchor(null);
+                                }}
+                                className="p-0.5 text-slate-400 hover:text-red-400 cursor-pointer shrink-0"
+                                title="Apagar sobreposição"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="max-h-56 overflow-y-auto space-y-1">
                 {visualMedia.length === 0 ? (
@@ -1717,6 +2084,24 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 )}
               </div>
 
+              <button
+                type="button"
+                onClick={() => {
+                  setEdgeStretchEnabled((v) => !v);
+                  setHoverEdge(null);
+                  setHoverCursor(null);
+                }}
+                className={`h-6 px-2 rounded text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                  edgeStretchEnabled
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    : 'bg-[#1A1E28] text-slate-400 hover:bg-white/10'
+                }`}
+                title="Ativar ou desativar alças de esticar ao passar o mouse na borda/final da imagem"
+              >
+                <MoveHorizontal className="w-3 h-3" />
+                <span>Esticar</span>
+              </button>
+
               <div className="flex items-center gap-1" role="group" aria-label="Resoluções do Palco">
                 {STAGE_RESOLUTIONS.map((preset) => {
                   const isSelectedRes =
@@ -1763,6 +2148,13 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 onPointerMove={handleCanvasPointerMove}
                 onPointerUp={handleCanvasPointerUp}
                 onPointerCancel={handleCanvasPointerUp}
+                onPointerLeave={() => {
+                  if (!canvasDragRef.current.active) {
+                    setHoverEdge(null);
+                    setHoverCursor(null);
+                  }
+                }}
+                style={hoverCursor ? { cursor: hoverCursor } : undefined}
                 className="max-h-[340px] sm:max-h-[370px] w-auto max-w-full h-auto mx-auto block touch-none select-none cursor-grab active:cursor-grabbing"
               />
             </div>
@@ -2114,9 +2506,34 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               </div>
 
               <div>
-                <div className="flex justify-between text-[11px] text-slate-400 mb-1">
+                <div className="flex justify-between items-center text-[11px] text-slate-400 mb-1">
                   <span>Escala</span>
-                  <span className="font-mono text-white">{selectedClip.scale.toFixed(2)}×</span>
+                  <div className="flex items-center gap-1.5">
+                    {(selectedClip.scaleX !== undefined &&
+                      selectedClip.scaleY !== undefined &&
+                      Math.abs(selectedClip.scaleX - selectedClip.scaleY) > 0.02) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const base = Number(
+                            (((selectedClip.scaleX ?? selectedClip.scale) + (selectedClip.scaleY ?? selectedClip.scale)) / 2).toFixed(2)
+                          );
+                          updateSelectedClip({ scale: base, scaleX: base, scaleY: base });
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[9px] hover:bg-emerald-500/25 cursor-pointer"
+                        title="Igualar largura e altura"
+                      >
+                        1:1
+                      </button>
+                    )}
+                    <span className="font-mono text-white">
+                      {selectedClip.scaleX !== undefined &&
+                      selectedClip.scaleY !== undefined &&
+                      Math.abs(selectedClip.scaleX - selectedClip.scaleY) > 0.02
+                        ? `${selectedClip.scaleX.toFixed(2)}×${selectedClip.scaleY.toFixed(2)}`
+                        : `${selectedClip.scale.toFixed(2)}×`}
+                    </span>
+                  </div>
                 </div>
                 <input
                   type="range"
@@ -2124,7 +2541,10 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                   max={4}
                   step={0.05}
                   value={selectedClip.scale}
-                  onChange={(e) => updateSelectedClip({ scale: Number(e.target.value) })}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    updateSelectedClip({ scale: val, scaleX: val, scaleY: val });
+                  }}
                   className="w-full accent-amber-500"
                 />
               </div>
@@ -2260,7 +2680,28 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
         title="Linha do Tempo Multipista"
         subtitle={`${formatDuration(currentTime)} / ${formatDuration(totalDuration)}`}
         headerExtra={
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setOverlayTrackOpen((v) => !v)}
+              className={`h-5 px-2 rounded text-[10px] font-semibold inline-flex items-center gap-1 border cursor-pointer ${
+                overlayTrackOpen
+                  ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-200'
+                  : 'bg-[#1A1E28] border-white/10 text-slate-300 hover:border-cyan-500/40'
+              }`}
+              aria-expanded={overlayTrackOpen}
+              title={overlayTrackOpen ? 'Retrair trilha de Sobreposição' : 'Expandir trilha de Sobreposição'}
+            >
+              <Layers className="w-2.5 h-2.5 text-cyan-400" />
+              <span>
+                Sobreposição ({project.videoClips.filter((c) => c.track === 'overlay').length})
+              </span>
+              {overlayTrackOpen ? (
+                <ChevronDown className="w-2.5 h-2.5" />
+              ) : (
+                <ChevronRight className="w-2.5 h-2.5" />
+              )}
+            </button>
             <button
               type="button"
               onClick={() => setIsPlaying((p) => !p)}
@@ -2478,16 +2919,61 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
 
           {(['overlay', 'video'] as const).map((trackName) => {
             const trackClips = project.videoClips.filter((c) => c.track === trackName);
+            if (trackName === 'overlay' && !overlayTrackOpen) {
+              return (
+                <div key={trackName} className="flex items-center gap-2 min-w-[540px]">
+                  <button
+                    type="button"
+                    onClick={() => setOverlayTrackOpen(true)}
+                    className="w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-cyan-300 hover:text-cyan-200 cursor-pointer text-left"
+                    title="Expandir trilha de Sobreposição"
+                  >
+                    <ChevronRight className="w-3 h-3 shrink-0" />
+                    <Layers className="w-3 h-3 shrink-0" />
+                    <span>Sobreposição</span>
+                  </button>
+                  <div
+                    onClick={() => setOverlayTrackOpen(true)}
+                    className="flex-1 h-6 rounded-md bg-[#0B0D11]/80 border border-cyan-500/20 hover:border-cyan-400/45 px-2.5 flex items-center justify-between text-[10px] text-cyan-300/80 cursor-pointer transition-colors"
+                  >
+                    <span>
+                      Sobreposição retraída ({trackClips.length} {trackClips.length === 1 ? 'clipe' : 'clipes'}) · Clique para expandir
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOverlayTrackOpen(true);
+                        importTargetTrackRef.current = 'overlay';
+                        fileInputRef.current?.click();
+                      }}
+                      className="h-4 px-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 text-[9px] font-bold text-cyan-200 inline-flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <Plus className="w-2.5 h-2.5" />
+                      Adicionar
+                    </button>
+                  </div>
+                </div>
+              );
+            }
             return (
               <div key={trackName} className="flex items-center gap-2 min-w-[540px]">
-                <span
-                  className={`w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 ${
-                    trackName === 'overlay' ? 'text-cyan-300' : 'text-slate-300'
-                  }`}
-                >
-                  {trackName === 'overlay' && <Layers className="w-3 h-3" />}
-                  {trackName === 'overlay' ? 'Sobreposição' : 'Vídeo Principal'}
-                </span>
+                {trackName === 'overlay' ? (
+                  <button
+                    type="button"
+                    onClick={() => setOverlayTrackOpen(false)}
+                    className="w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-cyan-300 hover:text-cyan-200 cursor-pointer text-left"
+                    title="Retrair trilha de Sobreposição"
+                  >
+                    <ChevronDown className="w-3 h-3 shrink-0" />
+                    <Layers className="w-3 h-3 shrink-0" />
+                    <span>Sobreposição</span>
+                  </button>
+                ) : (
+                  <span className="w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-slate-300">
+                    Vídeo Principal
+                  </span>
+                )}
                 <div
                   onPointerDown={(e) => {
                     if (e.target !== e.currentTarget) return;
@@ -2514,10 +3000,14 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                     );
                     const active = clip.id === selectedClipId;
                     const clipEnd = clip.startTime + clip.duration / Math.max(0.25, clip.speed);
+                    const mediaSrc = clip.mediaId ? mediaFiles.find((m) => m.id === clip.mediaId) : undefined;
+                    const maxClipSrcDur =
+                      clip.kind === 'video' && mediaSrc?.duration
+                        ? Math.max(clip.duration, mediaSrc.duration)
+                        : 300;
                     return (
-                      <button
+                      <div
                         key={clip.id}
-                        type="button"
                         onPointerDown={(e) => {
                           e.stopPropagation();
                           setSelectedClipId(clip.id);
@@ -2542,13 +3032,13 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                             origStartTime: clip.startTime,
                             origTrimStart: clip.trimStart,
                             origDuration: clip.duration,
-                            sourceDuration: clip.duration,
+                            sourceDuration: maxClipSrcDur,
                             speed: clip.speed,
                             trackWidthPx: rect?.width || 400,
                           };
                         }}
                         style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                        className={`absolute top-1 bottom-1 rounded px-1.5 text-left truncate text-[10px] font-medium border touch-none select-none cursor-pointer ${
+                        className={`group/clip absolute top-1 bottom-1 rounded px-1.5 pr-3 flex items-center text-left text-[10px] font-medium border touch-none select-none cursor-pointer ${
                           active
                             ? trackName === 'overlay'
                               ? 'bg-cyan-400 text-slate-950 border-cyan-200 font-bold'
@@ -2557,10 +3047,41 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                             ? 'bg-cyan-950/75 text-cyan-200 border-cyan-500/35 hover:border-cyan-400'
                             : 'bg-[#1E2534] text-slate-200 border-white/15 hover:border-amber-400/50'
                         }`}
-                        title="Clique em qualquer ponto para cortar ou arraste para mover"
+                        title="Clique para cortar, arraste para mover ou passe o mouse no final para esticar duração"
                       >
-                        {clip.name}
-                      </button>
+                        <span className="truncate flex-1 pointer-events-none">{clip.name}</span>
+                        {edgeStretchEnabled && (
+                          <div
+                            onPointerDown={(e) => {
+                              e.stopPropagation();
+                              setSelectedClipId(clip.id);
+                              setSelectedAudioClipId(null);
+                              const trackEl = e.currentTarget.parentElement?.parentElement;
+                              const rect = trackEl?.getBoundingClientRect();
+                              timelineDragRef.current = {
+                                active: true,
+                                moved: true,
+                                kind: 'video',
+                                track: trackName,
+                                mode: 'trim-right',
+                                clipId: clip.id,
+                                startClientX: e.clientX,
+                                clickTime: clipEnd,
+                                origStartTime: clip.startTime,
+                                origTrimStart: clip.trimStart,
+                                origDuration: clip.duration,
+                                sourceDuration: maxClipSrcDur,
+                                speed: clip.speed,
+                                trackWidthPx: rect?.width || 400,
+                              };
+                            }}
+                            className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize flex items-center justify-center rounded-r bg-emerald-400/0 group-hover/clip:bg-emerald-400/75 hover:!bg-emerald-400 transition-colors"
+                            title="Esticar ou encurtar duração no final"
+                          >
+                            <span className="w-0.5 h-3.5 rounded bg-slate-950/80 opacity-0 group-hover/clip:opacity-100" />
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                   {cutAnchor && cutAnchor.track === trackName && (

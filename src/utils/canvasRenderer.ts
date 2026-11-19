@@ -14,6 +14,7 @@ import {
   TextLayerConfig,
 } from '../types/studio';
 import { DecodedGif, pickGifFrameAtTime } from './gifDecoder';
+import { EdgeHoverTarget, drawEdgeStretchHandles } from './edgeStretch';
 
 export interface ResolvedTransform {
   x: number;
@@ -822,6 +823,8 @@ export function renderAnimationFrameToCanvas(
     gifCache?: Map<string, DecodedGif>;
     videoCache?: Map<string, HTMLVideoElement>;
     elapsedMs?: number;
+    edgeStretchEnabled?: boolean;
+    hoverEdge?: EdgeHoverTarget | null;
   }
 ): void {
   const { width, height, frames, layers } = project;
@@ -1032,6 +1035,41 @@ export function renderAnimationFrameToCanvas(
       ctx.fill();
 
       ctx.restore();
+
+      if (options.edgeStretchEnabled) {
+        drawEdgeStretchHandles(ctx, {
+          cx: tr.x,
+          cy: tr.y,
+          halfW,
+          halfH,
+          rotationDeg: tr.rotation,
+          hoveredEdge: options.hoverEdge?.id === sel.id ? options.hoverEdge.edge : null,
+          drawPreviewOutline: false,
+        });
+      }
+    }
+  }
+
+  // Hover preview when passing mouse over the edge/end of an unselected layer
+  if (
+    options?.edgeStretchEnabled &&
+    options.hoverEdge &&
+    options.hoverEdge.id !== options.selectedLayerId
+  ) {
+    const hovered = layers.find((l) => l.id === options.hoverEdge?.id);
+    if (hovered && hovered.visible) {
+      const tr = interpolateLayerAtFrame(hovered, safeIndex, frames.length);
+      const halfW = (hovered.width * Math.abs(tr.scaleX)) / 2 + 12;
+      const halfH = (hovered.height * Math.abs(tr.scaleY)) / 2 + 12;
+      drawEdgeStretchHandles(ctx, {
+        cx: tr.x,
+        cy: tr.y,
+        halfW,
+        halfH,
+        rotationDeg: tr.rotation,
+        hoveredEdge: options.hoverEdge.edge,
+        drawPreviewOutline: true,
+      });
     }
   }
 

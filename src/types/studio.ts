@@ -186,6 +186,8 @@ export interface VideoClip {
   x: number; // normalized offset -0.5 to 0.5 or px
   y: number;
   scale: number;
+  scaleX?: number;
+  scaleY?: number;
   rotation: number;
   opacity: number;
   transition: 'none' | 'fade-in' | 'fade-out' | 'fade-both';

@@ -34,8 +34,16 @@ import {
   FolderOpen,
   X,
   RotateCcw,
+  MoveHorizontal,
 } from 'lucide-react';
 import { useStageZoom } from '../../hooks/useStageZoom';
+import {
+  EdgeHoverTarget,
+  StretchEdge,
+  computeEdgeStretch,
+  detectEdgeHit,
+  getEdgeStretchCursor,
+} from '../../utils/edgeStretch';
 import {
   AnimationFrame,
   AnimationLayer,
@@ -151,10 +159,14 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     startY: 0,
   });
 
-  // Drag state (move, draw, corner resize, top knob rotate)
+  const [edgeStretchEnabled, setEdgeStretchEnabled] = useState(true);
+  const [hoverEdge, setHoverEdge] = useState<EdgeHoverTarget | null>(null);
+  const [hoverCursor, setHoverCursor] = useState<string | null>(null);
+
+  // Drag state (move, draw, corner resize, edge stretch, top knob rotate)
   const dragStateRef = useRef<{
     active: boolean;
-    mode: 'move' | 'draw' | 'resize' | 'rotate';
+    mode: 'move' | 'draw' | 'resize' | 'stretch-edge' | 'rotate';
     startX: number;
     startY: number;
     origX: number;
@@ -167,6 +179,10 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     origRotation: number;
     startAngle: number;
     strokeId?: string;
+    stretchEdge?: StretchEdge;
+    origLayerWidth?: number;
+    origLayerHeight?: number;
+    origLayerId?: string;
   }>({
     active: false,
     mode: 'move',
@@ -301,6 +317,8 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
       gifCache,
       videoCache,
       elapsedMs: liveElapsedMs,
+      edgeStretchEnabled: !isPlaying && toolMode === 'select' && edgeStretchEnabled,
+      hoverEdge: !isPlaying && toolMode === 'select' && edgeStretchEnabled ? hoverEdge : null,
     });
   }, [
     project,
@@ -316,6 +334,8 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
     selectedLayerId,
     toolMode,
     showGrid,
+    edgeStretchEnabled,
+    hoverEdge,
   ]);
 
   const toCanvasCoords = (clientX: number, clientY: number) => {
@@ -507,7 +527,40 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
       return;
     }
 
-    // 1) Check interactive resize/rotate handles on currently selected layer first
+    const findHoveredEdgeTarget = (
+      probe: { x: number; y: number }
+    ): { layer: AnimationLayer; edge: StretchEdge; rotation: number } | null => {
+      if (selectedLayer && selectedLayer.visible && !selectedLayer.locked) {
+        const tr = interpolateLayerAtFrame(selectedLayer, safeFrameIndex, project.frames.length);
+        const hw = (selectedLayer.width * Math.abs(tr.scaleX)) / 2 + 12;
+        const hh = (selectedLayer.height * Math.abs(tr.scaleY)) / 2 + 12;
+        const edge = detectEdgeHit(
+          probe,
+          { cx: tr.x, cy: tr.y, halfW: hw, halfH: hh, rotationDeg: tr.rotation },
+          24,
+          18
+        );
+        if (edge) return { layer: selectedLayer, edge, rotation: tr.rotation };
+      }
+
+      for (let i = project.layers.length - 1; i >= 0; i--) {
+        const l = project.layers[i];
+        if (!l.visible || l.locked || l.id === selectedLayerId) continue;
+        const tr = interpolateLayerAtFrame(l, safeFrameIndex, project.frames.length);
+        const hw = (l.width * Math.abs(tr.scaleX)) / 2 + 12;
+        const hh = (l.height * Math.abs(tr.scaleY)) / 2 + 12;
+        const edge = detectEdgeHit(
+          probe,
+          { cx: tr.x, cy: tr.y, halfW: hw, halfH: hh, rotationDeg: tr.rotation },
+          22,
+          12
+        );
+        if (edge) return { layer: l, edge, rotation: tr.rotation };
+      }
+      return null;
+    };
+
+    // 1) Check interactive resize/rotate/edge handles on currently selected layer first
     if (selectedLayer && selectedLayer.visible && !selectedLayer.locked) {
       const tr = interpolateLayerAtFrame(selectedLayer, safeFrameIndex, project.frames.length);
       const halfW = (selectedLayer.width * Math.abs(tr.scaleX)) / 2 + 12;
@@ -553,6 +606,36 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
           origDist: Math.max(20, Math.hypot(pt.x - tr.x, pt.y - tr.y)),
           origLocalX: Math.max(16, Math.abs(rx)),
           origLocalY: Math.max(16, Math.abs(ry)),
+        };
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        return;
+      }
+    }
+
+    // 1b) Check edge stretch handle on selected OR hovered layer when passing pointer over border
+    if (edgeStretchEnabled) {
+      const edgeHit = findHoveredEdgeTarget(pt);
+      if (edgeHit) {
+        const targetLayer = edgeHit.layer;
+        const tr = interpolateLayerAtFrame(targetLayer, safeFrameIndex, project.frames.length);
+        setSelectedLayerId(targetLayer.id);
+        setHoverEdge({ id: targetLayer.id, edge: edgeHit.edge });
+        setHoverCursor(getEdgeStretchCursor(edgeHit.edge, tr.rotation));
+        dragStateRef.current = {
+          ...dragStateRef.current,
+          active: true,
+          mode: 'stretch-edge',
+          startX: pt.x,
+          startY: pt.y,
+          origX: tr.x,
+          origY: tr.y,
+          origScaleX: tr.scaleX,
+          origScaleY: tr.scaleY,
+          origRotation: tr.rotation,
+          stretchEdge: edgeHit.edge,
+          origLayerWidth: targetLayer.width,
+          origLayerHeight: targetLayer.height,
+          origLayerId: targetLayer.id,
         };
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
         return;
@@ -614,8 +697,62 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (stageZoom.isMultiTouchBlocked()) return;
     if (stageZoom.movePanDrag(e.clientX, e.clientY)) return;
-    if (!dragStateRef.current.active) return;
     const pt = toCanvasCoords(e.clientX, e.clientY);
+
+    if (!dragStateRef.current.active) {
+      if (!isPlaying && toolMode === 'select' && edgeStretchEnabled) {
+        let nextTarget: EdgeHoverTarget | null = null;
+        let nextCursor: string | null = null;
+
+        if (selectedLayer && selectedLayer.visible && !selectedLayer.locked) {
+          const tr = interpolateLayerAtFrame(selectedLayer, safeFrameIndex, project.frames.length);
+          const hw = (selectedLayer.width * Math.abs(tr.scaleX)) / 2 + 12;
+          const hh = (selectedLayer.height * Math.abs(tr.scaleY)) / 2 + 12;
+          const edge = detectEdgeHit(
+            pt,
+            { cx: tr.x, cy: tr.y, halfW: hw, halfH: hh, rotationDeg: tr.rotation },
+            24,
+            18
+          );
+          if (edge) {
+            nextTarget = { id: selectedLayer.id, edge };
+            nextCursor = getEdgeStretchCursor(edge, tr.rotation);
+          }
+        }
+
+        if (!nextTarget) {
+          for (let i = project.layers.length - 1; i >= 0; i--) {
+            const l = project.layers[i];
+            if (!l.visible || l.locked || l.id === selectedLayerId) continue;
+            const tr = interpolateLayerAtFrame(l, safeFrameIndex, project.frames.length);
+            const hw = (l.width * Math.abs(tr.scaleX)) / 2 + 12;
+            const hh = (l.height * Math.abs(tr.scaleY)) / 2 + 12;
+            const edge = detectEdgeHit(
+              pt,
+              { cx: tr.x, cy: tr.y, halfW: hw, halfH: hh, rotationDeg: tr.rotation },
+              22,
+              12
+            );
+            if (edge) {
+              nextTarget = { id: l.id, edge };
+              nextCursor = getEdgeStretchCursor(edge, tr.rotation);
+              break;
+            }
+          }
+        }
+
+        if (nextTarget?.id !== hoverEdge?.id || nextTarget?.edge !== hoverEdge?.edge) {
+          setHoverEdge(nextTarget);
+        }
+        if (nextCursor !== hoverCursor) {
+          setHoverCursor(nextCursor);
+        }
+      } else if (hoverEdge || hoverCursor) {
+        setHoverEdge(null);
+        setHoverCursor(null);
+      }
+      return;
+    }
 
     if (dragStateRef.current.mode === 'draw' && dragStateRef.current.strokeId) {
       const sid = dragStateRef.current.strokeId;
@@ -630,6 +767,37 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                 ),
               }
             : f
+        ),
+      });
+      return;
+    }
+
+    if (dragStateRef.current.mode === 'stretch-edge' && dragStateRef.current.stretchEdge) {
+      const targetId = dragStateRef.current.origLayerId || selectedLayerId;
+      if (!targetId) return;
+      const stretched = computeEdgeStretch({
+        edge: dragStateRef.current.stretchEdge,
+        pt,
+        origCx: dragStateRef.current.origX,
+        origCy: dragStateRef.current.origY,
+        baseW: dragStateRef.current.origLayerWidth || 180,
+        baseH: dragStateRef.current.origLayerHeight || 180,
+        origScaleX: dragStateRef.current.origScaleX,
+        origScaleY: dragStateRef.current.origScaleY,
+        rotationDeg: dragStateRef.current.origRotation,
+      });
+      onUpdateProject({
+        ...project,
+        lastTool: 'animation',
+        layers: project.layers.map((l) =>
+          l.id === targetId
+            ? upsertLayerKeyframe(l, safeFrameIndex, {
+                x: stretched.cx,
+                y: stretched.cy,
+                scaleX: Number(stretched.scaleX.toFixed(2)),
+                scaleY: Number(stretched.scaleY.toFixed(2)),
+              })
+            : l
         ),
       });
       return;
@@ -1718,6 +1886,23 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                 })}
               </div>
               <button
+                type="button"
+                onClick={() => {
+                  setEdgeStretchEnabled((v) => !v);
+                  setHoverEdge(null);
+                  setHoverCursor(null);
+                }}
+                className={`h-7 px-2 rounded-md text-[10px] font-medium inline-flex items-center gap-1 cursor-pointer ${
+                  edgeStretchEnabled
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    : 'bg-[#1A1E28] text-slate-400'
+                }`}
+                title="Ativar ou desativar alças de esticar ao passar o mouse na borda/final da imagem"
+              >
+                <MoveHorizontal className="w-3 h-3" />
+                Esticar
+              </button>
+              <button
                 onClick={() => setOnionSkin((v) => !v)}
                 className={`h-7 px-2 rounded-md text-[10px] font-medium cursor-pointer ${
                   onionSkin ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-[#1A1E28] text-slate-400'
@@ -1788,6 +1973,13 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                 onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp}
                 onPointerCancel={handlePointerUp}
+                onPointerLeave={() => {
+                  if (!dragStateRef.current.active) {
+                    setHoverEdge(null);
+                    setHoverCursor(null);
+                  }
+                }}
+                style={hoverCursor && toolMode === 'select' ? { cursor: hoverCursor } : undefined}
                 className={`max-h-[380px] sm:max-h-[420px] w-auto max-w-full h-auto mx-auto block touch-none select-none ${
                   toolMode === 'eyedropper'
                     ? 'cursor-cell'
