@@ -7,6 +7,7 @@ import {
   Download,
   ArrowLeft,
   ArrowRightLeft,
+  Monitor,
 } from 'lucide-react';
 import {
   CustomFolder,
@@ -42,6 +43,7 @@ import { SavedProjectsView } from './components/views/SavedProjectsView';
 import { ExportView } from './components/views/ExportView';
 import { ConverterView } from './components/views/ConverterView';
 import { SettingsView } from './components/views/SettingsView';
+import { DesktopExportModal } from './components/views/DesktopExportModal';
 import { LeftWallVolume } from './components/LeftWallVolume';
 import {
   decodeAudioBlob,
@@ -59,6 +61,10 @@ export default function App() {
   const [galleryItems, setGalleryItems] = useState<GalleryItem[]>([]);
   const [settings, setSettings] = useState<StudioSettings>(() => localDb.getSettings());
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showDesktopModal, setShowDesktopModal] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('desktop') === '1';
+  });
   const [loading, setLoading] = useState(true);
 
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -532,7 +538,16 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="shrink-0">
+        <div className="shrink-0 flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setShowDesktopModal(true)}
+            className="h-7 px-2 rounded-md bg-[#13161D] hover:bg-[#1A1E28] border border-cyan-400/30 text-[11px] font-semibold text-cyan-200 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1 cursor-pointer"
+            title="Versão Desktop Windows (.exe) e macOS 10.15.8 (.dmg)"
+          >
+            <Monitor className="w-3.5 h-3.5 text-cyan-300" />
+            <span className="hidden sm:inline">Desktop</span>
+          </button>
           {view === 'home' ? (
             <button
               onClick={() => setShowNewModal(true)}
@@ -568,6 +583,7 @@ export default function App() {
                 onNavigate={navigate}
                 onNewProject={() => setShowNewModal(true)}
                 onOpenProject={handleOpenProject}
+                onOpenDesktopModal={() => setShowDesktopModal(true)}
               />
             )}
 
@@ -705,6 +721,7 @@ export default function App() {
                 settings={settings}
                 onSaveSettings={handleSaveSettings}
                 onClearAllStorage={handleClearAllStorage}
+                onOpenDesktopModal={() => setShowDesktopModal(true)}
               />
             )}
           </>
@@ -745,6 +762,11 @@ export default function App() {
         defaultFps={settings.defaultFps}
         onClose={() => setShowNewModal(false)}
         onCreate={handleCreateProject}
+      />
+
+      <DesktopExportModal
+        open={showDesktopModal}
+        onClose={() => setShowDesktopModal(false)}
       />
     </div>
   );

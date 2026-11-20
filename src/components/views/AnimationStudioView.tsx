@@ -1806,7 +1806,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-1">
-              {/* Controles de Zoom do Palco de Animação (Scroll Mouse + Touch Pinch/Duplo Toque) */}
+              {/* Controles de Zoom do Palco de Animação (Touch Pinch/Duplo Toque + Botões) */}
               <div
                 className="flex items-center gap-0.5 bg-[#0B0D11] border border-white/10 rounded-md p-0.5"
                 role="group"
@@ -1820,7 +1820,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                       ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
                       : 'text-slate-400 hover:bg-white/10'
                   }`}
-                  title="Ativar ou desativar zoom no scroll do mouse e toque na tela"
+                  title="Ativar ou desativar zoom por toque na tela"
                 >
                   <ZoomIn className="w-3 h-3" />
                   <span>Zoom</span>
@@ -2073,7 +2073,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
               </span>
             ) : selectedLayer && selectedTransform ? (
               <span>
-                Arraste para mover · Scroll/Pinça dá zoom no ponteiro ou toque
+                Arraste para mover · Pinça/duplo toque ou botões +/- dão zoom
               </span>
             ) : (
               <span>Clique em qualquer imagem ou objeto no palco para selecionar e redimensionar.</span>
@@ -2653,11 +2653,11 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
         }
       >
         {/* Synchronized Multi-Track Timeline Grid (36px frame/layer rows) */}
-        <div className="rounded-lg bg-[#0B0D11] border border-white/10 overflow-x-auto">
-          <div className="min-w-max">
+        <div className="rounded-lg bg-[#0B0D11] border border-white/10 overflow-x-auto no-scrollbar">
+          <div className="min-w-full w-max">
             {/* Playhead Time Ruler */}
             <div className="flex border-b border-white/10 bg-[#151923]">
-              <div className="w-36 shrink-0 sticky left-0 z-20 bg-[#151923] border-r border-white/10 px-2.5 py-1 text-[10px] font-semibold text-slate-300 flex items-center justify-between">
+              <div className="w-24 sm:w-36 shrink-0 sticky left-0 z-20 bg-[#151923] border-r border-white/10 px-2 sm:px-2.5 py-1 text-[10px] font-semibold text-slate-300 flex items-center justify-between">
                 <span>Pistas</span>
                 <span className="font-mono text-slate-500">{project.frames.length}Q</span>
               </div>
@@ -2695,7 +2695,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
 
             {/* Frame-by-frame Drawing & Duration Track (36px h-9) */}
             <div className="flex border-b border-white/8 bg-[#10131A]">
-              <div className="w-36 shrink-0 sticky left-0 z-20 bg-[#10131A] border-r border-white/10 px-2.5 py-1 text-[10px] font-medium text-cyan-300 flex items-center gap-1">
+              <div className="w-24 sm:w-36 shrink-0 sticky left-0 z-20 bg-[#10131A] border-r border-white/10 px-2 sm:px-2.5 py-1 text-[10px] font-medium text-cyan-300 flex items-center gap-1">
                 <PenTool className="w-3 h-3 shrink-0" />
                 <span className="truncate">Quadros / Traços</span>
               </div>
@@ -2750,7 +2750,7 @@ export const AnimationStudioView: React.FC<AnimationStudioViewProps> = ({
                   >
                     <div
                       onClick={() => setSelectedLayerId(layer.id)}
-                      className={`w-36 shrink-0 sticky left-0 z-20 border-r border-white/10 px-2 py-1 flex items-center justify-between gap-1 cursor-pointer ${
+                      className={`w-24 sm:w-36 shrink-0 sticky left-0 z-20 border-r border-white/10 px-2 py-1 flex items-center justify-between gap-1 cursor-pointer ${
                         isSel ? 'bg-[#1D1B16] text-amber-300' : 'bg-[#0F1218] text-slate-300'
                       }`}
                     >

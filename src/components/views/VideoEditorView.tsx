@@ -124,6 +124,8 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
   const [overlayTrackOpen, setOverlayTrackOpen] = useState(() =>
     project.videoClips.some((c) => c.track === 'overlay')
   );
+  const [rightOverlayPanelOpen, setRightOverlayPanelOpen] = useState(false);
+  const [rightOverlayInspectorOpen, setRightOverlayInspectorOpen] = useState(true);
 
   const canvasDragRef = useRef<{
     active: boolean;
@@ -2029,7 +2031,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               Palco ({aspectLabel} · {project.width}×{project.height})
             </span>
             <div className="flex flex-wrap items-center gap-1.5">
-              {/* Controles de Zoom do Player (Scroll Mouse + Touch Pinch/Duplo Toque) */}
+              {/* Controles de Zoom do Player (Touch Pinch/Duplo Toque + Botões) */}
               <div
                 className="flex items-center gap-0.5 bg-[#0B0D11] border border-white/10 rounded-md p-0.5"
                 role="group"
@@ -2043,7 +2045,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                       ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
                       : 'text-slate-400 hover:bg-white/10'
                   }`}
-                  title="Ativar ou desativar zoom no scroll do mouse e toque na tela"
+                  title="Ativar ou desativar zoom por toque na tela"
                 >
                   <ZoomIn className="w-3 h-3" />
                   <span>Zoom</span>
@@ -2192,7 +2194,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
           </div>
           <div className="text-[10px] text-slate-400 px-1 flex flex-wrap items-center justify-between gap-1.5">
             <span>
-              Arraste com o dedo ou mouse · Scroll/Pinça dá zoom no ponteiro ou toque
+              Arraste com o dedo ou mouse · Pinça/duplo toque ou botões +/- dão zoom
             </span>
             {selectedClip && (
               <span className="font-mono text-amber-300">
@@ -2224,6 +2226,117 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
 
         {/* Right Clip / Audio Inspector */}
         <div className="rounded-xl bg-[#13161D] border border-white/8 p-2.5 space-y-2.5 max-h-[540px] overflow-y-auto">
+          {/* Barra Retrátil de Sobreposição no lado direito */}
+          <div className="rounded-lg bg-[#0F1218] border border-cyan-500/25 overflow-hidden">
+            <div className="flex items-center justify-between gap-1 px-2 py-1.5">
+              <button
+                type="button"
+                onClick={() => setRightOverlayPanelOpen((v) => !v)}
+                className="flex-1 min-w-0 flex items-center gap-1.5 text-left text-[11px] font-semibold text-cyan-200 hover:text-white cursor-pointer"
+                aria-expanded={rightOverlayPanelOpen}
+                title={
+                  rightOverlayPanelOpen
+                    ? 'Retrair arquivos da sobreposição'
+                    : 'Expandir arquivos da sobreposição'
+                }
+              >
+                {rightOverlayPanelOpen ? (
+                  <ChevronDown className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                )}
+                <Layers className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="truncate">
+                  Sobreposição ({project.videoClips.filter((c) => c.track === 'overlay').length})
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRightOverlayPanelOpen(true);
+                  importTargetTrackRef.current = 'overlay';
+                  fileInputRef.current?.click();
+                }}
+                className="h-5 px-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-500/40 text-[10px] font-bold text-cyan-200 inline-flex items-center gap-0.5 cursor-pointer shrink-0"
+                title="Adicionar arquivo na sobreposição"
+              >
+                <Plus className="w-2.5 h-2.5" />
+              </button>
+            </div>
+
+            {rightOverlayPanelOpen && (
+              <div className="px-2 pb-2 pt-1.5 border-t border-white/8 space-y-1.5">
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      importTargetTrackRef.current = 'overlay';
+                      fileInputRef.current?.click();
+                    }}
+                    className="h-6 px-2 rounded bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-[10px] font-semibold text-cyan-200 inline-flex items-center justify-center gap-1 cursor-pointer"
+                  >
+                    <Layers className="w-3 h-3" />+ Sobreposição
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOverlayTrackOpen(true);
+                      addOverlayTextClip();
+                    }}
+                    className="h-6 px-2 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-[10px] font-semibold text-amber-300 inline-flex items-center justify-center gap-1 cursor-pointer"
+                  >
+                    <Type className="w-3 h-3" />+ Legenda
+                  </button>
+                </div>
+
+                {project.videoClips.some((c) => c.track === 'overlay') ? (
+                  <div className="max-h-28 overflow-y-auto space-y-1">
+                    {project.videoClips
+                      .filter((c) => c.track === 'overlay')
+                      .map((ov) => (
+                        <div
+                          key={ov.id}
+                          onClick={() => {
+                            setSelectedClipId(ov.id);
+                            setSelectedAudioClipId(null);
+                            setCurrentTime(ov.startTime);
+                            setRightOverlayInspectorOpen(true);
+                          }}
+                          className={`flex items-center justify-between gap-1 rounded px-2 py-1 text-[10px] border cursor-pointer ${
+                            selectedClipId === ov.id
+                              ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-100'
+                              : 'bg-[#1A1E28] border-white/5 text-slate-300 hover:border-cyan-500/30'
+                          }`}
+                        >
+                          <span className="truncate flex-1">{ov.name}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onUpdateProject({
+                                ...project,
+                                videoClips: project.videoClips.filter((c) => c.id !== ov.id),
+                              });
+                              if (selectedClipId === ov.id) setSelectedClipId(null);
+                              if (cutAnchor?.clipId === ov.id) setCutAnchor(null);
+                            }}
+                            className="p-0.5 text-slate-400 hover:text-red-400 cursor-pointer shrink-0"
+                            title="Apagar sobreposição"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-500 text-center py-1">
+                    Nenhum arquivo na sobreposição.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
           {selectedAudioClip ? (
             <>
               <div className="flex items-center justify-between pb-2 border-b border-white/8">
@@ -2389,15 +2502,46 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               </button>
             </>
           ) : selectedClip ? (
-            <>
-              <div className="flex items-center justify-between pb-2 border-b border-white/8">
-                <h3 className="text-xs font-semibold text-white truncate flex items-center gap-1.5">
-                  <Sliders className="w-3.5 h-3.5 text-amber-400" />
-                  {selectedClip.name}
-                </h3>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#0B0D11] text-slate-300 shrink-0">
-                  {selectedClip.track === 'video' ? 'Vídeo Principal' : 'Sobreposição'}
+            selectedClip.track === 'overlay' && !rightOverlayInspectorOpen ? (
+              <button
+                type="button"
+                onClick={() => setRightOverlayInspectorOpen(true)}
+                className="w-full flex items-center justify-between gap-2 rounded-lg bg-[#0F1218] border border-cyan-500/30 hover:border-cyan-400/50 px-2.5 py-2 text-left cursor-pointer"
+                aria-expanded={false}
+                title="Expandir ajustes da sobreposição"
+              >
+                <span className="text-xs font-semibold text-cyan-200 truncate flex items-center gap-1.5 min-w-0">
+                  <ChevronRight className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <Layers className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span className="truncate">{selectedClip.name}</span>
                 </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 shrink-0">
+                  Sobreposição · Abrir
+                </span>
+              </button>
+            ) : (
+            <>
+              <div className="flex items-center justify-between gap-1.5 pb-2 border-b border-white/8">
+                <h3 className="text-xs font-semibold text-white truncate flex items-center gap-1.5 min-w-0">
+                  <Sliders className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="truncate">{selectedClip.name}</span>
+                </h3>
+                {selectedClip.track === 'overlay' ? (
+                  <button
+                    type="button"
+                    onClick={() => setRightOverlayInspectorOpen(false)}
+                    className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-cyan-200 inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                    aria-expanded={true}
+                    title="Retrair ajustes da sobreposição"
+                  >
+                    <ChevronDown className="w-3 h-3" />
+                    <span>Sobreposição</span>
+                  </button>
+                ) : (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#0B0D11] text-slate-300 shrink-0">
+                    Vídeo Principal
+                  </span>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-1.5">
@@ -2667,6 +2811,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                 </div>
               )}
             </>
+            )
           ) : (
             <p className="text-xs text-slate-400 py-10 text-center">
               Toque ou clique em um vídeo, imagem ou áudio na linha do tempo ou no palco para editar.
@@ -2730,11 +2875,11 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
           onPointerMove={handleTimelinePointerMove}
           onPointerUp={handleTimelinePointerUp}
           onPointerCancel={handleTimelinePointerUp}
-          className="space-y-1.5 overflow-x-auto"
+          className="space-y-1.5 overflow-x-hidden"
         >
           {/* Floating / Anchored Cut Menu right at the clicked spot on video or audio */}
           {cutAnchor && (
-            <div className="min-w-[540px] relative h-8">
+            <div className="w-full relative h-8">
               <div
                 style={{
                   left: `${Math.max(0, Math.min(28, (cutAnchor.time / totalDuration) * 100))}%`,
@@ -2921,22 +3066,22 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
             const trackClips = project.videoClips.filter((c) => c.track === trackName);
             if (trackName === 'overlay' && !overlayTrackOpen) {
               return (
-                <div key={trackName} className="flex items-center gap-2 min-w-[540px]">
+                <div key={trackName} className="flex items-center gap-2 min-w-0">
                   <button
                     type="button"
                     onClick={() => setOverlayTrackOpen(true)}
-                    className="w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-cyan-300 hover:text-cyan-200 cursor-pointer text-left"
+                    className="w-20 sm:w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-cyan-300 hover:text-cyan-200 cursor-pointer text-left"
                     title="Expandir trilha de Sobreposição"
                   >
                     <ChevronRight className="w-3 h-3 shrink-0" />
                     <Layers className="w-3 h-3 shrink-0" />
-                    <span>Sobreposição</span>
+                    <span className="truncate">Sobreposição</span>
                   </button>
                   <div
                     onClick={() => setOverlayTrackOpen(true)}
-                    className="flex-1 h-6 rounded-md bg-[#0B0D11]/80 border border-cyan-500/20 hover:border-cyan-400/45 px-2.5 flex items-center justify-between text-[10px] text-cyan-300/80 cursor-pointer transition-colors"
+                    className="flex-1 min-w-0 h-6 rounded-md bg-[#0B0D11]/80 border border-cyan-500/20 hover:border-cyan-400/45 px-2.5 flex items-center justify-between gap-2 text-[10px] text-cyan-300/80 cursor-pointer transition-colors"
                   >
-                    <span>
+                    <span className="truncate min-w-0">
                       Sobreposição retraída ({trackClips.length} {trackClips.length === 1 ? 'clipe' : 'clipes'}) · Clique para expandir
                     </span>
                     <button
@@ -2947,7 +3092,7 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
                         importTargetTrackRef.current = 'overlay';
                         fileInputRef.current?.click();
                       }}
-                      className="h-4 px-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 text-[9px] font-bold text-cyan-200 inline-flex items-center gap-0.5 cursor-pointer"
+                      className="h-4 px-1.5 rounded bg-cyan-500/20 hover:bg-cyan-500/35 text-[9px] font-bold text-cyan-200 inline-flex items-center gap-0.5 cursor-pointer shrink-0"
                     >
                       <Plus className="w-2.5 h-2.5" />
                       Adicionar
@@ -2957,20 +3102,20 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
               );
             }
             return (
-              <div key={trackName} className="flex items-center gap-2 min-w-[540px]">
+              <div key={trackName} className="flex items-center gap-2 min-w-0">
                 {trackName === 'overlay' ? (
                   <button
                     type="button"
                     onClick={() => setOverlayTrackOpen(false)}
-                    className="w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-cyan-300 hover:text-cyan-200 cursor-pointer text-left"
+                    className="w-20 sm:w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-cyan-300 hover:text-cyan-200 cursor-pointer text-left"
                     title="Retrair trilha de Sobreposição"
                   >
                     <ChevronDown className="w-3 h-3 shrink-0" />
                     <Layers className="w-3 h-3 shrink-0" />
-                    <span>Sobreposição</span>
+                    <span className="truncate">Sobreposição</span>
                   </button>
                 ) : (
-                  <span className="w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-slate-300">
+                  <span className="w-20 sm:w-24 text-[10px] font-medium shrink-0 inline-flex items-center gap-1 text-slate-300 truncate">
                     Vídeo Principal
                   </span>
                 )}
@@ -3101,10 +3246,10 @@ export const VideoEditorView: React.FC<VideoEditorViewProps> = ({
           })}
 
           {/* Audio Track (40px) */}
-          <div className="flex items-center gap-2 min-w-[540px]">
-            <span className="w-24 text-[10px] font-medium text-emerald-300 shrink-0 inline-flex items-center gap-1">
-              <Music className="w-3 h-3" />
-              Áudio / Música
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-20 sm:w-24 text-[10px] font-medium text-emerald-300 shrink-0 inline-flex items-center gap-1">
+              <Music className="w-3 h-3 shrink-0" />
+              <span className="truncate">Áudio / Música</span>
             </span>
             <div
               onPointerDown={(e) => {

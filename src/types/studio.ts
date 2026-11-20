@@ -291,3 +291,16 @@ export const DEFAULT_SETTINGS: StudioSettings = {
   gridVisible: true,
   snapToGrid: true,
 };
+
+export interface DesktopStudioBridge {
+  isDesktop: boolean;
+  isPortable: boolean;
+  platform: string;
+  portableDir?: string | null;
+}
+
+declare global {
+  interface Window {
+    desktopStudio?: DesktopStudioBridge;
+  }
+}

@@ -17,6 +17,7 @@ import {
   Play,
   HardDrive,
   ArrowRightLeft,
+  Monitor,
 } from 'lucide-react';
 import { StudioProject, StudioView } from '../../types/studio';
 
@@ -28,6 +29,7 @@ interface HomeViewProps {
   onNavigate: (view: StudioView) => void;
   onNewProject: () => void;
   onOpenProject: (project: StudioProject) => void;
+  onOpenDesktopModal: () => void;
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({
@@ -38,6 +40,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onNavigate,
   onNewProject,
   onOpenProject,
+  onOpenDesktopModal,
 }) => {
   const studioTools: {
     id: string;
@@ -153,6 +156,13 @@ export const HomeView: React.FC<HomeViewProps> = ({
       icon: Settings,
       action: () => onNavigate('settings'),
     },
+    {
+      id: 'desktop-exe',
+      label: 'DESKTOP (.EXE / .DMG)',
+      subtitle: 'Windows Portable & macOS 10.15',
+      icon: Monitor,
+      action: onOpenDesktopModal,
+    },
   ];
 
   return (
@@ -178,6 +188,15 @@ export const HomeView: React.FC<HomeViewProps> = ({
             <span>{projects.length} projetos</span>
             <span aria-hidden="true">·</span>
             <span>{galleryCount} na galeria</span>
+            <button
+              type="button"
+              onClick={onOpenDesktopModal}
+              className="ml-1 inline-flex items-center gap-1 text-[11px] font-sans font-semibold text-cyan-300 hover:text-cyan-200 cursor-pointer"
+              title="Versão Desktop Windows (.exe) e macOS 10.15.8 (.dmg)"
+            >
+              <Monitor className="w-3 h-3" />
+              Desktop (.exe / macOS .dmg)
+            </button>
           </div>
         </div>
 

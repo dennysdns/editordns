@@ -206,23 +206,10 @@ export function useStageZoom(
     [resetZoom, zoomAtClientPoint]
   );
 
-  // Non-passive mouse wheel & multi-touch pinch zoom anchored at pointer / touch midpoint
+  // Multi-touch pinch zoom anchored at touch midpoint
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
-
-    const handleWheel = (e: WheelEvent) => {
-      if (!zoomEnabledRef.current) return;
-      e.preventDefault();
-      e.stopPropagation();
-
-      // Normalize both trackpad micro-deltas and notched mouse wheel deltas
-      const modeMultiplier = e.deltaMode === 1 ? 24 : e.deltaMode === 2 ? 120 : 1;
-      const normalizedDelta = Math.max(-140, Math.min(140, e.deltaY * modeMultiplier));
-      const factor = Math.exp(-normalizedDelta * 0.0024);
-      const targetZoom = zoomRef.current * factor;
-      zoomAtClientPoint(targetZoom, e.clientX, e.clientY);
-    };
 
     const getTouchMetrics = (touches: TouchList) => {
       const t0 = touches[0];
@@ -310,14 +297,12 @@ export function useStageZoom(
       }
     };
 
-    vp.addEventListener('wheel', handleWheel, { passive: false });
     vp.addEventListener('touchstart', handleTouchStart, { passive: false, capture: true });
     vp.addEventListener('touchmove', handleTouchMove, { passive: false, capture: true });
     vp.addEventListener('touchend', handleTouchEndOrCancel, { capture: true });
     vp.addEventListener('touchcancel', handleTouchEndOrCancel, { capture: true });
 
     return () => {
-      vp.removeEventListener('wheel', handleWheel);
       vp.removeEventListener('touchstart', handleTouchStart, { capture: true });
       vp.removeEventListener('touchmove', handleTouchMove, { capture: true });
       vp.removeEventListener('touchend', handleTouchEndOrCancel, { capture: true });

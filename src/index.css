@@ -12,6 +12,8 @@
     background-color: #0B0D11;
     color: #F1F5F9;
     overscroll-behavior-y: contain;
+    overflow-x: hidden;
+    max-width: 100%;
   }
 
   h1, h2, h3, h4, .font-display {
@@ -22,6 +24,15 @@
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+}
+
+/* Hide scrollbars where horizontal scrollbars are undesired */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 /* Custom studio scrollbars */

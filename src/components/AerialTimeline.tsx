@@ -91,7 +91,7 @@ export const AerialTimeline: React.FC<AerialTimelineProps> = ({
       className={`fixed left-0 bottom-13 lg:bottom-3 z-40 flex items-stretch rounded-r-xl bg-[#13161D]/95 backdrop-blur-md border border-l-0 shadow-2xl overflow-hidden transition-[width,border-color] duration-200 ease-out ${
         collapsed
           ? 'w-8 border-amber-500/50 hover:border-amber-400'
-          : 'w-[calc(100vw-8px)] lg:w-[min(95vw,1240px)] border-amber-500/40'
+          : 'w-[calc(100%-8px)] lg:w-[min(95%,1240px)] border-amber-500/40'
       }`}
     >
       {/* Left-wall vertical drawer handle (embedded on left edge, expands horizontally) */}
