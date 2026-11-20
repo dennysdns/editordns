@@ -158,8 +158,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
     },
     {
       id: 'desktop-exe',
-      label: 'DESKTOP (.EXE / .DMG)',
-      subtitle: 'Windows Portable & macOS 10.15',
+      label: 'ANDROID & DESKTOP',
+      subtitle: 'APK, Win .EXE e Mac .DMG',
       icon: Monitor,
       action: onOpenDesktopModal,
     },
@@ -192,10 +192,10 @@ export const HomeView: React.FC<HomeViewProps> = ({
               type="button"
               onClick={onOpenDesktopModal}
               className="ml-1 inline-flex items-center gap-1 text-[11px] font-sans font-semibold text-cyan-300 hover:text-cyan-200 cursor-pointer"
-              title="Versão Desktop Windows (.exe) e macOS 10.15.8 (.dmg)"
+              title="Versão Android (.apk), Windows (.exe) e macOS 10.15.8 (.dmg)"
             >
               <Monitor className="w-3 h-3" />
-              Desktop (.exe / macOS .dmg)
+              Android (.apk) · Win (.exe) · Mac (.dmg)
             </button>
           </div>
         </div>

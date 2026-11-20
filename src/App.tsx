@@ -63,7 +63,8 @@ export default function App() {
   const [showNewModal, setShowNewModal] = useState(false);
   const [showDesktopModal, setShowDesktopModal] = useState(() => {
     if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('desktop') === '1';
+    const q = new URLSearchParams(window.location.search);
+    return q.get('desktop') === '1' || q.get('android') === '1';
   });
   const [loading, setLoading] = useState(true);
 
@@ -543,10 +544,10 @@ export default function App() {
             type="button"
             onClick={() => setShowDesktopModal(true)}
             className="h-7 px-2 rounded-md bg-[#13161D] hover:bg-[#1A1E28] border border-cyan-400/30 text-[11px] font-semibold text-cyan-200 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1 cursor-pointer"
-            title="Versão Desktop Windows (.exe) e macOS 10.15.8 (.dmg)"
+            title="Baixar App: Android (.apk), Windows (.exe) e macOS 10.15.8 (.dmg)"
           >
             <Monitor className="w-3.5 h-3.5 text-cyan-300" />
-            <span className="hidden sm:inline">Desktop</span>
+            <span className="hidden sm:inline">Baixar App</span>
           </button>
           {view === 'home' ? (
             <button

@@ -62,7 +62,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-400/35 bg-cyan-500/15 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/25 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Monitor className="w-4 h-4" />
-              Desktop (.exe / macOS .dmg)
+              Android (.apk) / Desktop (.exe / .dmg)
             </button>
             <PWAInstallButton />
           </div>
