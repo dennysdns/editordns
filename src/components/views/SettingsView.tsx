@@ -1,22 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { HardDrive, Trash2, CheckCircle2, Settings, Monitor } from 'lucide-react';
+import { HardDrive, Trash2, CheckCircle2, Settings } from 'lucide-react';
 import { StudioSettings } from '../../types/studio';
 import { formatBytes } from '../../utils/mediaImporter';
 import { STAGE_RESOLUTIONS } from '../../utils/resolutionPresets';
-import { PWAInstallButton } from '../PWAInstallButton';
 
 interface SettingsViewProps {
   settings: StudioSettings;
   onSaveSettings: (next: StudioSettings) => void;
   onClearAllStorage: () => Promise<void>;
-  onOpenDesktopModal: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
   onSaveSettings,
   onClearAllStorage,
-  onOpenDesktopModal,
 }) => {
   const [quotaInfo, setQuotaInfo] = useState<{ usage: number; quota: number } | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -56,15 +53,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 Salvo
               </span>
             )}
-            <button
-              type="button"
-              onClick={onOpenDesktopModal}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cyan-400/35 bg-cyan-500/15 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/25 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Monitor className="w-4 h-4" />
-              Android (.apk) / Desktop (.exe / .dmg)
-            </button>
-            <PWAInstallButton />
           </div>
         </div>
 

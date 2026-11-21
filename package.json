@@ -3,19 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js release",
-    "lint": "tsc --noEmit",
-    "desktop:dev": "ELECTRON_DEV_URL=http://localhost:3000 npx electron electron/main.cjs",
-    "desktop:build:portable": "npm run build && npx electron-builder --config electron-builder.json --win portable",
-    "desktop:build:exe": "npm run build && npx electron-builder --config electron-builder.json --win portable nsis",
-    "desktop:build:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --config electron-builder.json --mac dmg zip --x64",
-    "android:sync": "npm run build && npx cap sync android",
-    "android:build:apk": "npm run build && npx cap sync android && cd android && ./gradlew assembleDebug"
+    "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
